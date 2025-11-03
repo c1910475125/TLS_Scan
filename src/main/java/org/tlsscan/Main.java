@@ -1,8 +1,6 @@
 package org.tlsscan;
 
 import org.tlsscan.Commands.AnalyzeCommand;
-import org.tlsscan.Commands.CancelToken;
-import org.tlsscan.Commands.StopController;
 import org.tlsscan.Commands.StoreScoreCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.*;
@@ -17,7 +15,7 @@ import java.util.concurrent.Callable;
 @Command(
         name = "passive-cert-analyzer",
         mixinStandardHelpOptions = true,
-        version = "0.3.1",
+        version = "0.3.4",
         description = "Passive TLS-Zertifikatsplattform: CT-Stream (WS), CT-Poll (HTTP), Offline-Analyse & TrustStore-Score."
 )
 public class Main implements Callable<Integer> {
@@ -42,7 +40,7 @@ public class Main implements Callable<Integer> {
         return 0;
     }
 
-    // ===== Defaults (Projektroot/Scanfiles) =====
+    // ===== Defaults =====
     private static Path projectRoot() { return Paths.get(System.getProperty("user.dir")); }
     private static Path defaultScanDir() { return projectRoot().resolve("Scanfiles"); }
     private static Path defaultOutputPath() { return defaultScanDir().resolve("certs.jsonl"); }
@@ -81,27 +79,26 @@ public class Main implements Callable<Integer> {
         String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs.jsonl");
         boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", false);
         int reconnectDelay = readInt(in, "Reconnect-Delay (Sek.)", 10, 0, 3600);
-        long duration = readLong(in, "Dauer in Sekunden (0 = unbegrenzt)");
-        long maxEvents = readLong(in, "Max. Events (0 = unbegrenzt)");
+        long duration = readLong(in, "Dauer in Sekunden (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
+        long maxEvents = readLong(in, "Max. Events (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
         boolean progress = true;
 
         Path outPath = Paths.get(outDir).resolve(outFile);
         ensureDir(outPath.getParent());
 
-        CancelToken cancel = StopController.install("Abbrechen: 'q' + Enter oder Strg+C");
         System.out.println("Hinweis: Passiv – KEIN aktiver Traffic zu Dritten außer dem WS-Endpoint.");
-        new CertStreamClient(outPath, certOnly, reconnectDelay, duration, maxEvents, debug, progress, endpoint, cancel).run();
+        new CertStreamClient(outPath, certOnly, reconnectDelay, duration, maxEvents, debug, progress, endpoint).run();
     }
 
     // --- Interaktiv: CT-Poll ---
     private static void runCtPollInteractive(Scanner in) {
         System.out.println("\n--- CT-Poll (passiv, HTTP RFC6962) ---");
         String logUrl = promptFree(in, "CT-Log-Basis (--log)", "https://ct.googleapis.com/logs/argon2023");
-        long start = readLong(in, "Start-Index (--start)");
+        long start = readLong(in, "Start-Index (--start)", 0, 0, Long.MAX_VALUE);
         int batch = readInt(in, "Batchgröße (--batch)", 256, 1, 4096);
-        int sleepMs = readInt(in, "Pause zwischen  Batches ms (--sleep-ms)", 500, 0, 60000);
-        long maxEntries = readLong(in, "Max. Einträge (0 = unbegrenzt) (--max-entries)");
+        int sleepMs = readInt(in, "Pause zwischen Batches ms (--sleep-ms)", 500, 0, 60000);
+        long maxEntries = readLong(in, "Max. Einträge (0 = unbegrenzt) (--max-entries)", 0, 0, Long.MAX_VALUE);
         String outDir = promptFree(in, "Output-Ordner (--out-dir)", defaultScanDir().toString());
         String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs_poll.jsonl");
         boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", true);
@@ -111,9 +108,7 @@ public class Main implements Callable<Integer> {
         Path outPath = Paths.get(outDir).resolve(outFile);
         ensureDir(outPath.getParent());
 
-        CancelToken cancel = StopController.install("Abbrechen: 'q' + Enter oder Strg+C");
-        new CtPoller(outPath, certOnly, progress, debug, cancel)
-                .run(logUrl, start, batch, sleepMs, maxEntries);
+        new CtPoller(outPath, certOnly, progress, debug).run(logUrl, start, batch, sleepMs, maxEntries);
     }
 
     // --- Interaktiv: Analyze ---
@@ -150,6 +145,7 @@ public class Main implements Callable<Integer> {
     }
 
     // ===== CLI-Subcommands =====
+
     @Command(name = "ct-stream", description = "Liest öffentliche CT-Events per WebSocket und schreibt JSONL.")
     static class CtStreamCommand implements Callable<Integer> {
         @Option(names={"--endpoint"}, description="WebSocket-Endpoint (default: wss://certstream.calidog.io/)")
@@ -176,8 +172,7 @@ public class Main implements Callable<Integer> {
         @Override public Integer call() {
             Path outPath = (output != null) ? output : outDir.resolve(outFile);
             ensureDir(outPath.getParent());
-            CancelToken cancel = StopController.install("Abbrechen: 'q' + Enter oder Strg+C");
-            new CertStreamClient(outPath, certOnly, reconnectDelay, durationSeconds, maxEvents, debug, !noProgress, endpoint, cancel).run();
+            new CertStreamClient(outPath, certOnly, reconnectDelay, durationSeconds, maxEvents, debug, !noProgress, endpoint).run();
             return 0;
         }
     }
@@ -214,13 +209,12 @@ public class Main implements Callable<Integer> {
             }
             Path outPath = (output != null) ? output : outDir.resolve(outFile);
             ensureDir(outPath.getParent());
-            CancelToken cancel = StopController.install("Abbrechen: 'q' + Enter oder Strg+C");
-            new CtPoller(outPath, certOnly, !noProgress, debug, cancel).run(logUrl, start, batch, sleepMs, maxEntries);
+            new CtPoller(outPath, certOnly, !noProgress, debug).run(logUrl, start, batch, sleepMs, maxEntries);
             return 0;
         }
     }
 
-    // ===== Validierungs- & Hilfsfunktionen (interaktiv) =====
+    // ===== Hilfsfunktionen =====
     private static String promptFree(Scanner in, String label, String def) {
         System.out.print(label + (def != null && !def.isBlank() ? " [" + def + "]" : "") + ": ");
         String s = in.nextLine().trim();
@@ -242,7 +236,7 @@ public class Main implements Callable<Integer> {
             String s = in.nextLine().trim().toLowerCase();
             if (s.isBlank()) return def;
             if (s.startsWith("y") || s.equals("ja") || s.equals("j")) return true;
-            if (s.startsWith("n") || s.equals("nein")) return false;
+            if (s.startsWith("n") || s.equals("nein") || s.equals("n")) return false;
             System.out.println("Invalid value, try again");
         }
     }
@@ -260,21 +254,20 @@ public class Main implements Callable<Integer> {
             }
         }
     }
-    private static long readLong(Scanner in, String label) {
+    private static long readLong(Scanner in, String label, long def, long min, long max) {
         while (true) {
-            System.out.print(label + " [" + (long) 0 + "]: ");
+            System.out.print(label + " [" + def + "]: ");
             String s = in.nextLine().trim();
-            if (s.isBlank()) return 0;
+            if (s.isBlank()) return def;
             try {
                 long v = Long.parseLong(s);
-                if (v < (long) 0) throw new NumberFormatException();
+                if (v < min || v > max) throw new NumberFormatException();
                 return v;
             } catch (NumberFormatException e) {
                 System.out.println("Invalid value, try again");
             }
         }
     }
-
     private static Path defaultJavaCacerts() {
         String javaHome = System.getProperty("java.home");
         if (javaHome == null) return Paths.get("");

@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.example</groupId>
     <artifactId>passive-cert-analyzer</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.4</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

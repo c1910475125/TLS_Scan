@@ -3,7 +3,6 @@ package org.tlsscan;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.tlsscan.Commands.CancelToken;
 
 import java.io.*;
 import java.net.ProxySelector;
@@ -38,7 +37,6 @@ public class CertStreamClient {
     private final boolean debug;
     private final boolean progress;
     private final String endpointUrl;
-    private final CancelToken cancel;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public CertStreamClient(Path outputPath,
@@ -48,8 +46,7 @@ public class CertStreamClient {
                             long maxEvents,
                             boolean debug,
                             boolean progress,
-                            String endpointUrl,
-                            CancelToken cancel) {
+                            String endpointUrl) {
         this.outputPath = Objects.requireNonNull(outputPath);
         this.certOnly = certOnly;
         this.reconnectDelaySeconds = Math.max(1, reconnectDelaySeconds);
@@ -58,7 +55,6 @@ public class CertStreamClient {
         this.debug = debug;
         this.progress = progress;
         this.endpointUrl = endpointUrl != null ? endpointUrl : "wss://certstream.calidog.io/";
-        this.cancel = cancel != null ? cancel : new CancelToken();
     }
 
     public void run() {
@@ -84,8 +80,7 @@ public class CertStreamClient {
             return t;
         });
 
-        outer:
-        while (!cancel.isCancelled()) {
+        while (true) {
             if (System.currentTimeMillis() >= deadlineMillis) break;
 
             CountDownLatch done = new CountDownLatch(1);
@@ -119,7 +114,7 @@ public class CertStreamClient {
 
                 WebSocket ws = client.newWebSocketBuilder()
                         .connectTimeout(Duration.ofSeconds(20))
-                        .header("User-Agent", "passive-cert-analyzer/0.3.1 (Java)")
+                        .header("User-Agent", "passive-cert-analyzer/0.3.4 (Java)")
                         .header("Origin", endpointUrl.startsWith("ws") ? endpointUrl : "https://certstream.calidog.io")
                         .buildAsync(URI.create(endpointUrl), new Listener() {
 
@@ -141,11 +136,6 @@ public class CertStreamClient {
                             @Override
                             public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
                                 try {
-                                    if (cancel.isCancelled()) {
-                                        safeClose(webSocket, "cancel");
-                                        done.countDown();
-                                        return completed();
-                                    }
                                     textBuf.append(data);
                                     if (last) {
                                         String msg = textBuf.toString();
@@ -182,11 +172,6 @@ public class CertStreamClient {
                             @Override
                             public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
                                 try {
-                                    if (cancel.isCancelled()) {
-                                        safeClose(webSocket, "cancel");
-                                        done.countDown();
-                                        return completed();
-                                    }
                                     byte[] bytes = new byte[data.remaining()];
                                     data.get(bytes);
                                     String msg = new String(bytes, StandardCharsets.UTF_8);
@@ -248,7 +233,6 @@ public class CertStreamClient {
                 if (progress) System.out.print("\r");
             }
 
-            if (cancel.isCancelled()) break;
             if (System.currentTimeMillis() >= deadlineMillis) break;
 
             System.out.println("Re-Connect in " + reconnectDelaySeconds + "s …");
@@ -264,7 +248,7 @@ public class CertStreamClient {
         String out;
         JsonNode n = mapper.readTree(text);
         if (certOnly) {
-            ObjectNode obj = mapper.createObjectNode();
+            ObjectNode obj = new ObjectMapper().createObjectNode();
             obj.set("message_type", n.get("message_type"));
             obj.set("data", n.get("data"));
             out = obj.toString();

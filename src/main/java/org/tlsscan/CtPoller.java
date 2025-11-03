@@ -3,7 +3,6 @@ package org.tlsscan;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.tlsscan.Commands.CancelToken;
 
 import java.io.*;
 import java.net.URI;
@@ -26,15 +25,13 @@ public class CtPoller {
     private final boolean certOnly;
     private final boolean progress;
     private final boolean debug;
-    private final CancelToken cancel;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public CtPoller(Path outputPath, boolean certOnly, boolean progress, boolean debug, CancelToken cancel) {
+    public CtPoller(Path outputPath, boolean certOnly, boolean progress, boolean debug) {
         this.outputPath = outputPath;
         this.certOnly = certOnly;
         this.progress = progress;
         this.debug = debug;
-        this.cancel = cancel;
     }
 
     public void run(String logBaseUrl, long startIndex, int batchSize, int sleepMs, long maxEntries) {
@@ -50,7 +47,7 @@ public class CtPoller {
 
         try (BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputPath.toFile(), true), StandardCharsets.UTF_8))) {
             Instant t0 = Instant.now();
-            while (remaining > 0 && !cancel.isCancelled()) {
+            while (remaining > 0) {
                 int take = (int) Math.min(batchSize, remaining);
                 long end = idx + take - 1;
                 String url = normalize(logBaseUrl) + "/ct/v1/get-entries?start=" + idx + "&end=" + end;
@@ -75,8 +72,6 @@ public class CtPoller {
 
                 int processed = 0;
                 for (JsonNode e : entries) {
-                    if (cancel.isCancelled()) break;
-
                     String leafInputB64 = e.path("leaf_input").asText(null);
                     String extraDataB64 = e.path("extra_data").asText(null);
 
@@ -112,7 +107,7 @@ public class CtPoller {
                     processed++;
                 }
 
-                bw.flush(); // bis hier sicher auf Platte
+                bw.flush();
 
                 written.addAndGet(processed);
                 idx += processed;
@@ -124,7 +119,6 @@ public class CtPoller {
                     System.out.printf("\r[HTTP] Entries: %,d  (%.2f/s)  File: %s", written.get(), rate, outputPath);
                 }
 
-                if (cancel.isCancelled()) break;
                 if (sleepMs > 0) TimeUnit.MILLISECONDS.sleep(sleepMs);
             }
         } catch (Exception ex) {
@@ -134,12 +128,12 @@ public class CtPoller {
         if (progress) System.out.println("\nCT-Poll beendet. Geschriebene Einträge: " + written.get());
     }
 
-    // --- minimale Decoder-Helfer ---
+    // --- Decoder-Helfer ---
     private String pemFromLeafOrNull(byte[] leaf) {
         if (leaf.length < 12) return null;
         int entryType = ((leaf[10] & 0xff) << 8) | (leaf[11] & 0xff);
         int pos = 12;
-        if (entryType == 0) { // X509Entry
+        if (entryType == 0) {
             if (leaf.length < pos + 3) return null;
             int certLen = uint24(leaf, pos); pos += 3;
             if (leaf.length < pos + certLen) return null;
@@ -172,7 +166,7 @@ public class CtPoller {
         try {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             X509Certificate x = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der));
-            String b64 = Base64.getEncoder().encodeToString(der);
+            String b64 = java.util.Base64.getEncoder().encodeToString(der);
             StringBuilder sb = new StringBuilder();
             sb.append("-----BEGIN CERTIFICATE-----\n");
             for (int i=0;i<b64.length();i+=64) {

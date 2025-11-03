@@ -25,8 +25,8 @@ public class StoreScoreCommand implements Callable<Integer> {
             description="Passwort für JKS/PKCS12 (falls nötig).")
     String password;
 
-    @Option(names={"--country-scores"}, required=true,
-            description="Pfad zu ISO2->TrustScore (JSON).")
+    @Option(names={"--country-scores"},
+            description="Pfad zu ISO2->TrustScore (JSON). Wenn leer: aus Classpath laden.")
     Path countryScores;
 
     @Option(names={"--country-from"},
@@ -39,8 +39,9 @@ public class StoreScoreCommand implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
+        String scoresPath = countryScores != null ? countryScores.toString() : null;
         double score = new StoreScorer().scoreStore(
-                store.toString(), type, password, countryScores.toString(), countryFrom, includeNonCa
+                store.toString(), type, password, scoresPath, countryFrom, includeNonCa
         );
         System.out.println();
         System.out.printf("===> Gesamter gewichteter TrustScore: %.6f%n", score);
