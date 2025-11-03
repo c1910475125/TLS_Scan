@@ -12,7 +12,6 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -64,7 +63,7 @@ public class CtPoller {
 
                 JsonNode root = mapper.readTree(resp.body());
                 JsonNode entries = root.get("entries");
-                if (entries == null || !entries.isArray() || entries.size() == 0) {
+                if (entries == null || !entries.isArray() || entries.isEmpty()) {
                     if (debug) System.out.println("Keine Einträge (leer). Warte …");
                     TimeUnit.MILLISECONDS.sleep(Math.max(1000, sleepMs));
                     continue;
@@ -165,7 +164,7 @@ public class CtPoller {
     private String derToPemIfValid(byte[] der) {
         try {
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            X509Certificate x = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der));
+            cf.generateCertificate(new ByteArrayInputStream(der));
             String b64 = java.util.Base64.getEncoder().encodeToString(der);
             StringBuilder sb = new StringBuilder();
             sb.append("-----BEGIN CERTIFICATE-----\n");

@@ -79,8 +79,8 @@ public class Main implements Callable<Integer> {
         String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs.jsonl");
         boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", false);
         int reconnectDelay = readInt(in, "Reconnect-Delay (Sek.)", 10, 0, 3600);
-        long duration = readLong(in, "Dauer in Sekunden (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-        long maxEvents = readLong(in, "Max. Events (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
+        long duration = readLong(in, "Dauer in Sekunden (0 = unbegrenzt)");
+        long maxEvents = readLong(in, "Max. Events (0 = unbegrenzt)");
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
         boolean progress = true;
 
@@ -95,10 +95,10 @@ public class Main implements Callable<Integer> {
     private static void runCtPollInteractive(Scanner in) {
         System.out.println("\n--- CT-Poll (passiv, HTTP RFC6962) ---");
         String logUrl = promptFree(in, "CT-Log-Basis (--log)", "https://ct.googleapis.com/logs/argon2023");
-        long start = readLong(in, "Start-Index (--start)", 0, 0, Long.MAX_VALUE);
+        long start = readLong(in, "Start-Index (--start)");
         int batch = readInt(in, "Batchgröße (--batch)", 256, 1, 4096);
         int sleepMs = readInt(in, "Pause zwischen Batches ms (--sleep-ms)", 500, 0, 60000);
-        long maxEntries = readLong(in, "Max. Einträge (0 = unbegrenzt) (--max-entries)", 0, 0, Long.MAX_VALUE);
+        long maxEntries = readLong(in, "Max. Einträge (0 = unbegrenzt) (--max-entries)");
         String outDir = promptFree(in, "Output-Ordner (--out-dir)", defaultScanDir().toString());
         String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs_poll.jsonl");
         boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", true);
@@ -236,7 +236,7 @@ public class Main implements Callable<Integer> {
             String s = in.nextLine().trim().toLowerCase();
             if (s.isBlank()) return def;
             if (s.startsWith("y") || s.equals("ja") || s.equals("j")) return true;
-            if (s.startsWith("n") || s.equals("nein") || s.equals("n")) return false;
+            if (s.startsWith("n") || s.equals("nein")) return false;
             System.out.println("Invalid value, try again");
         }
     }
@@ -254,14 +254,14 @@ public class Main implements Callable<Integer> {
             }
         }
     }
-    private static long readLong(Scanner in, String label, long def, long min, long max) {
+    private static long readLong(Scanner in, String label) {
         while (true) {
-            System.out.print(label + " [" + def + "]: ");
+            System.out.print(label + " [" + (long) 0 + "]: ");
             String s = in.nextLine().trim();
-            if (s.isBlank()) return def;
+            if (s.isBlank()) return 0;
             try {
                 long v = Long.parseLong(s);
-                if (v < min || v > max) throw new NumberFormatException();
+                if (v < (long) 0) throw new NumberFormatException();
                 return v;
             } catch (NumberFormatException e) {
                 System.out.println("Invalid value, try again");

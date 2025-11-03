@@ -8,7 +8,6 @@ import java.nio.file.*;
 import java.security.KeyStore;
 import java.security.cert.*;
 import java.util.*;
-import java.util.stream.Collectors;
 import java.util.Base64;
 import java.util.Locale;
 
@@ -24,7 +23,7 @@ public class StoreScorer {
 
         List<X509Certificate> considered = certs.stream()
                 .filter(c -> includeNonCa || isCaCert(c))
-                .collect(Collectors.toList());
+                .toList();
 
         if (considered.isEmpty()) {
             System.out.println("Keine (passenden) Zertifikate im Store gefunden.");
@@ -47,8 +46,8 @@ public class StoreScorer {
         System.out.println("Berücksichtigte Zertifikate: " + total + (includeNonCa ? " (inkl. Nicht-CA)" : " (nur CAs)"));
         System.out.println("Landebasis: " + ("issuer".equalsIgnoreCase(countryFrom) ? "Issuer (Aussteller)" : "Subject (Inhaber)"));
         System.out.println();
-        System.out.println(String.format("%-6s %10s %12s %14s %14s",
-                "Land", "Anzahl", "Anteil(%)", "TrustScore", "Teilbetrag"));
+        System.out.printf("%-6s %10s %12s %14s %14s%n",
+                "Land", "Anzahl", "Anteil(%)", "TrustScore", "Teilbetrag");
 
         double weighted = 0.0;
         List<Map.Entry<String,Integer>> rows = new ArrayList<>(countByCountry.entrySet());
@@ -61,8 +60,8 @@ public class StoreScorer {
             Double ts = scoreByIso2.get(iso2);
             double part = ts == null ? 0.0 : ts * frac;
 
-            System.out.println(String.format(Locale.ROOT, "%-6s %10d %12.2f %14s %14.6f",
-                    iso2, cnt, 100.0 * frac, ts == null ? "n/a" : String.format(Locale.ROOT, "%.6f", ts), part));
+            System.out.printf(Locale.ROOT, "%-6s %10d %12.2f %14s %14.6f%n",
+                    iso2, cnt, 100.0 * frac, ts == null ? "n/a" : String.format(Locale.ROOT, "%.6f", ts), part);
 
             if (ts != null) weighted += part;
         }
@@ -75,7 +74,8 @@ public class StoreScorer {
             Path p = Paths.get(path);
             if (Files.exists(p)) {
                 try (InputStream in = Files.newInputStream(p)) {
-                    return normalizeScores(mapper.readValue(in, new TypeReference<Map<String, Double>>(){}));
+                    return normalizeScores(mapper.readValue(in, new TypeReference<>() {
+                    }));
                 }
             }
         }
@@ -84,7 +84,8 @@ public class StoreScorer {
             if (in == null) {
                 throw new FileNotFoundException("country_trustscores.json nicht gefunden (Pfad und Classpath geprüft).");
             }
-            return normalizeScores(mapper.readValue(in, new TypeReference<Map<String, Double>>(){}));
+            return normalizeScores(mapper.readValue(in, new TypeReference<>() {
+            }));
         }
     }
 
@@ -97,18 +98,13 @@ public class StoreScorer {
     }
 
     private List<X509Certificate> loadCertificates(String path, String type, String password) throws Exception {
-        switch (type.toLowerCase(Locale.ROOT)) {
-            case "jks":
-                return loadFromKeyStore(path, "JKS", password);
-            case "pkcs12":
-                return loadFromKeyStore(path, "PKCS12", password);
-            case "pem-bundle":
-                return loadFromPemBundle(path);
-            case "pem-dir":
-                return loadFromPemDir(path);
-            default:
-                throw new IllegalArgumentException("Unbekannter Store-Typ: " + type);
-        }
+        return switch (type.toLowerCase(Locale.ROOT)) {
+            case "jks" -> loadFromKeyStore(path, "JKS", password);
+            case "pkcs12" -> loadFromKeyStore(path, "PKCS12", password);
+            case "pem-bundle" -> loadFromPemBundle(path);
+            case "pem-dir" -> loadFromPemDir(path);
+            default -> throw new IllegalArgumentException("Unbekannter Store-Typ: " + type);
+        };
     }
 
     private List<X509Certificate> loadFromKeyStore(String path, String ksType, String password) throws Exception {

@@ -239,8 +239,8 @@ public class CertStreamClient {
             try { Thread.sleep(reconnectDelaySeconds * 1000L); } catch (InterruptedException ie) { break; }
         }
 
-        if (progress) System.out.println(String.format("WS-Stream beendet. Events geschrieben: %,d  Datei: %s",
-                eventCount.get(), outputPath));
+        if (progress) System.out.printf("WS-Stream beendet. Events geschrieben: %,d  Datei: %s%n",
+                eventCount.get(), outputPath);
     }
 
     private int handleMessage(String text, BufferedWriter bw) throws IOException {

@@ -29,7 +29,7 @@ public class Analyzer {
                 }
                 if (pem == null) {
                     JsonNode chain = data.path("chain");
-                    if (chain.isArray() && chain.size() > 0) {
+                    if (chain.isArray() && !chain.isEmpty()) {
                         JsonNode first = chain.get(0);
                         pem = first.has("pem") ? first.get("pem").asText(null) : first.asText(null);
                     }
