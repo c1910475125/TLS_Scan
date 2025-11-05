@@ -1,29 +1,29 @@
 package org.tlsscan;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import io.calidog.certstream.CertStream;
 
-import java.io.*;
-import java.net.ProxySelector;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.WebSocket;
-import java.net.http.WebSocket.Listener;
-import java.nio.ByteBuffer;
+import java.io.BufferedWriter;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
+import java.nio.file.*;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.Objects;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * CT-Stream-Client gemäß README-Beispiel:
+ * - CertStream.onMessageString(System.out::println)   -> bei uns: Schreiben ins File + CLI-Echo
+ * - CertStream.onMessage(msg -> System.out.println(new Gson().toJson(msg))) -> optionales Debug-Echo
+ *
+ * Stoppt logisch über durationSeconds / maxEvents (die Lib bietet kein explizites close()).
+ */
 public class CertStreamClient {
 
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")
@@ -31,30 +31,25 @@ public class CertStreamClient {
 
     private final Path outputPath;
     private final boolean certOnly;
-    private final int reconnectDelaySeconds;
     private final long durationSeconds;
     private final long maxEvents;
     private final boolean debug;
     private final boolean progress;
-    private final String endpointUrl;
-    private final ObjectMapper mapper = new ObjectMapper();
+
+    private final Gson gson = new Gson();
 
     public CertStreamClient(Path outputPath,
                             boolean certOnly,
-                            int reconnectDelaySeconds,
                             long durationSeconds,
                             long maxEvents,
                             boolean debug,
-                            boolean progress,
-                            String endpointUrl) {
+                            boolean progress) {
         this.outputPath = Objects.requireNonNull(outputPath);
         this.certOnly = certOnly;
-        this.reconnectDelaySeconds = Math.max(1, reconnectDelaySeconds);
         this.durationSeconds = Math.max(0, durationSeconds);
         this.maxEvents = Math.max(0, maxEvents);
         this.debug = debug;
         this.progress = progress;
-        this.endpointUrl = endpointUrl != null ? endpointUrl : "wss://certstream.calidog.io/";
     }
 
     public void run() {
@@ -70,194 +65,80 @@ public class CertStreamClient {
                 ? System.currentTimeMillis() + durationSeconds * 1000L
                 : Long.MAX_VALUE;
 
-        final AtomicLong eventCount = new AtomicLong(0);
+        final AtomicLong eventCount   = new AtomicLong(0);
         final AtomicLong bytesWritten = new AtomicLong(0);
-        final AtomicLong lastMsgMillis = new AtomicLong(0);
+        final AtomicBoolean stopped   = new AtomicBoolean(false);
 
-        ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "progress");
-            t.setDaemon(true);
-            return t;
-        });
+        System.out.println("CT-Stream starten … Ausgabe: " + outputPath);
 
-        while (true) {
-            if (System.currentTimeMillis() >= deadlineMillis) break;
+        try (BufferedWriter bw = new BufferedWriter(
+                new OutputStreamWriter(new FileOutputStream(outputPath.toFile(), true), StandardCharsets.UTF_8))) {
 
-            CountDownLatch done = new CountDownLatch(1);
-            Timer pingTimer = new Timer("ws-ping", true);
-            Instant start = Instant.now();
+            // 1) README-Variante: onMessageString(System.out::println)
+            //    -> wir schreiben die Zeile ins File und zeigen sie parallel im CLI (gekürzt)
+            CertStream.onMessageString((String msg) -> {
+                if (stopped.get()) return;
+                try {
+                    long n = eventCount.incrementAndGet();
 
-            try (BufferedWriter bw = new BufferedWriter(
-                    new OutputStreamWriter(new FileOutputStream(outputPath.toFile(), true), StandardCharsets.UTF_8))) {
+                    // ggf. auf "certOnly" eindampfen (nur message_type + data)
+                    String toWrite;
+                    if (certOnly) {
+                        JsonObject j = JsonParser.parseString(msg).getAsJsonObject();
+                        JsonObject slim = new JsonObject();
+                        slim.add("message_type", j.get("message_type"));
+                        slim.add("data", j.get("data"));
+                        toWrite = slim.toString();
+                    } else {
+                        toWrite = msg;
+                    }
 
-                if (progress) {
-                    ticker.scheduleAtFixedRate(() -> {
-                        long ev = eventCount.get();
-                        long b = bytesWritten.get();
-                        long last = lastMsgMillis.get();
-                        double secs = Math.max(1, Duration.between(start, Instant.now()).toSeconds());
-                        double eps = ev / secs;
-                        String lastStr = last == 0 ? "-" : TS.format(Instant.ofEpochMilli(last));
-                        String line = String.format(
-                                "\r[WS] Events: %,d  (%.2f/s)  Bytes: %,d  Last: %s  File: %s",
-                                ev, eps, b, lastStr, outputPath);
-                        System.out.print(line);
-                    }, 0, 1000, TimeUnit.MILLISECONDS);
+                    // ins File
+                    bw.write(toWrite);
+                    bw.newLine();
+                    bw.flush();
+                    bytesWritten.addAndGet(toWrite.length() + 1);
+
+                    // paralleles CLI-"Tail"
+                    if (progress) {
+                        String preview = toWrite.length() > 200 ? toWrite.substring(0, 200) + " …" : toWrite;
+                        System.out.printf("\r[CT] #%d @ %s  -> %s%n", n, TS.format(Instant.now()), preview);
+                    }
+
+                    // Stop-Bedingungen
+                    if ((maxEvents > 0 && n >= maxEvents) || (System.currentTimeMillis() >= deadlineMillis)) {
+                        stopped.set(true);
+                        System.out.println("\nStop-Bedingung erreicht – beende Aufnahme …");
+                    }
+                } catch (Exception e) {
+                    System.err.println("Fehler beim Verarbeiten/Schreiben: " + e.getMessage());
                 }
+            });
 
-                HttpClient client = HttpClient.newBuilder()
-                        .connectTimeout(Duration.ofSeconds(20))
-                        .proxy(ProxySelector.getDefault())
-                        .build();
-
-                if (debug) System.out.println("\nVerbinde zu: " + endpointUrl);
-
-                WebSocket ws = client.newWebSocketBuilder()
-                        .connectTimeout(Duration.ofSeconds(20))
-                        .header("User-Agent", "passive-cert-analyzer/0.3.4 (Java)")
-                        .header("Origin", endpointUrl.startsWith("ws") ? endpointUrl : "https://certstream.calidog.io")
-                        .buildAsync(URI.create(endpointUrl), new Listener() {
-
-                            private final StringBuilder textBuf = new StringBuilder();
-
-                            @Override
-                            public void onOpen(WebSocket webSocket) {
-                                System.out.println("\nVerbunden. Schreibe nach: " + outputPath);
-                                webSocket.request(1);
-                                pingTimer.scheduleAtFixedRate(new TimerTask() {
-                                    @Override public void run() {
-                                        try { webSocket.sendPing(ByteBuffer.wrap(new byte[]{0x01})); }
-                                        catch (Exception ignored) {}
-                                    }
-                                }, 30000, 30000);
-                                Listener.super.onOpen(webSocket);
-                            }
-
-                            @Override
-                            public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-                                try {
-                                    textBuf.append(data);
-                                    if (last) {
-                                        String msg = textBuf.toString();
-                                        textBuf.setLength(0);
-
-                                        if (System.currentTimeMillis() >= deadlineMillis) {
-                                            safeClose(webSocket, "time-limit");
-                                            done.countDown();
-                                            return completed();
-                                        }
-
-                                        int wrote = handleMessage(msg, bw);
-                                        long n = eventCount.incrementAndGet();
-                                        bytesWritten.addAndGet(wrote + 1);
-                                        lastMsgMillis.set(System.currentTimeMillis());
-
-                                        if (debug && n <= 5) {
-                                            System.out.println("\n[DBG] onText #" + n + " len=" + msg.length());
-                                        }
-                                        if (maxEvents > 0 && n >= maxEvents) {
-                                            safeClose(webSocket, "max-events");
-                                            done.countDown();
-                                            return completed();
-                                        }
-                                    }
-                                } catch (Exception e) {
-                                    System.err.println("\nFehler onText: " + e.getMessage());
-                                } finally {
-                                    webSocket.request(1);
-                                }
-                                return completed();
-                            }
-
-                            @Override
-                            public CompletionStage<?> onBinary(WebSocket webSocket, ByteBuffer data, boolean last) {
-                                try {
-                                    byte[] bytes = new byte[data.remaining()];
-                                    data.get(bytes);
-                                    String msg = new String(bytes, StandardCharsets.UTF_8);
-
-                                    if (System.currentTimeMillis() >= deadlineMillis) {
-                                        safeClose(webSocket, "time-limit");
-                                        done.countDown();
-                                        return completed();
-                                    }
-
-                                    int wrote = handleMessage(msg, bw);
-                                    long n = eventCount.incrementAndGet();
-                                    bytesWritten.addAndGet(wrote + 1);
-                                    lastMsgMillis.set(System.currentTimeMillis());
-
-                                    if (debug && n <= 5) {
-                                        System.out.println("\n[DBG] onBinary #" + n + " len=" + msg.length());
-                                    }
-                                    if (maxEvents > 0 && n >= maxEvents) {
-                                        safeClose(webSocket, "max-events");
-                                        done.countDown();
-                                        return completed();
-                                    }
-                                } catch (Exception e) {
-                                    System.err.println("\nFehler onBinary: " + e.getMessage());
-                                } finally {
-                                    webSocket.request(1);
-                                }
-                                return completed();
-                            }
-
-                            @Override
-                            public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
-                                System.out.println("\nWebSocket geschlossen: " + statusCode + " (" + reason + ")");
-                                try { bw.flush(); } catch (IOException ignored) {}
-                                done.countDown();
-                                return completed();
-                            }
-
-                            @Override
-                            public void onError(WebSocket webSocket, Throwable error) {
-                                System.err.println("\nWebSocket-Fehler: " + error.getMessage());
-                                try { bw.flush(); } catch (IOException ignored) {}
-                                done.countDown();
-                            }
-
-                            private CompletionStage<Void> completed() { return CompletableFuture.completedFuture(null); }
-                            private void safeClose(WebSocket ws, String reason) { try { ws.sendClose(WebSocket.NORMAL_CLOSURE, reason); } catch (Exception ignored) {} }
-                        }).join();
-
-                done.await();
-                try { ws.abort(); } catch (Exception ignored) {}
-            } catch (InterruptedException ie) {
-                System.out.println("\nAbbruch erkannt, beende.");
-                break;
-            } catch (Exception e) {
-                System.err.println("\nVerbindungs-/I/O-Fehler: " + e.getMessage());
-            } finally {
-                if (progress) System.out.print("\r");
+            // 2) README-Variante: getyptes Debug-Echo über Gson (optional)
+            if (debug) {
+                CertStream.onMessage(msg -> {
+                    if (stopped.get()) return;
+                    try {
+                        String pretty = gson.toJson(msg);
+                        System.out.println("[DBG] " + pretty);
+                    } catch (Exception ignore) {
+                        // Debug-Output darf Fehler ignorieren
+                    }
+                });
             }
 
-            if (System.currentTimeMillis() >= deadlineMillis) break;
+            // main wait-loop, bis logisch gestoppt
+            while (!stopped.get()
+                    && System.currentTimeMillis() < deadlineMillis
+                    && (maxEvents == 0 || eventCount.get() < maxEvents)) {
+                try { Thread.sleep(200); } catch (InterruptedException ie) { break; }
+            }
 
-            System.out.println("Re-Connect in " + reconnectDelaySeconds + "s …");
-            try { Thread.sleep(reconnectDelaySeconds * 1000L); } catch (InterruptedException ie) { break; }
+        } catch (Exception e) {
+            System.err.println("Fehler im CertStreamClient: " + e.getMessage());
         }
 
-        if (progress) System.out.printf("WS-Stream beendet. Events geschrieben: %,d  Datei: %s%n",
-                eventCount.get(), outputPath);
-    }
-
-    private int handleMessage(String text, BufferedWriter bw) throws IOException {
-        if (text == null || text.isBlank()) return 0;
-        String out;
-        JsonNode n = mapper.readTree(text);
-        if (certOnly) {
-            ObjectNode obj = new ObjectMapper().createObjectNode();
-            obj.set("message_type", n.get("message_type"));
-            obj.set("data", n.get("data"));
-            out = obj.toString();
-        } else {
-            out = n.toString();
-        }
-        bw.write(out);
-        bw.write("\n");
-        bw.flush();
-        return out.length();
+        System.out.println("\nCT-Stream beendet. Events: " + (eventCount.get()) + "  Datei: " + outputPath);
     }
 }
