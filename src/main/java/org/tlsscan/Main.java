@@ -13,7 +13,7 @@ import java.nio.file.Paths;
 import java.util.*;
 
 @Command(
-        name = "passive-cert-analyzer",
+        name = "tls-analyzer",
         mixinStandardHelpOptions = true,
         description = "Toolset zur Analyse von TLS-Zertifikaten (passiv über CT-Feeds und aktiv via Scan)."
 )
@@ -26,7 +26,7 @@ public class Main implements java.util.concurrent.Callable<Integer> {
                     .addSubcommand("ct-poll", new CtPollCommand())
                     .addSubcommand("scan", new ActiveScanCommand())
                     .addSubcommand("analyze", new AnalyzeCommand())
-                    .addSubcommand("store-score", new StoreScoreCommand())
+                    .addSubcommand("root-score", new StoreScoreCommand())
                     .execute(args);
             System.exit(exit);
         } else {
@@ -36,12 +36,12 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     @Override
     public Integer call() {
-        System.out.println("Verwende Subcommands: 'ct-stream' / 'ct-poll' / 'scan' / 'analyze' / 'store-score'");
+        System.out.println("Verwende Subcommands: 'ct-stream' / 'ct-poll' / 'scan' / 'analyze' / 'root-score'");
         System.out.println("Oder ohne Argumente starten, um das interaktive Menü zu nutzen.");
         return 0;
     }
 
-    // ===== Defaults / Helper =====
+    // ===== Pfad-/Default-Helfer =====
 
     private static Path projectRoot() {
         return Paths.get(System.getProperty("user.dir"));
@@ -49,6 +49,10 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     private static Path defaultScanDir() {
         return projectRoot().resolve("Scanfiles");
+    }
+
+    private static Path defaultRootStoreDir() {
+        return projectRoot().resolve("RootStores");
     }
 
     private static Path defaultOutputPath() {
@@ -75,17 +79,74 @@ public class Main implements java.util.concurrent.Callable<Integer> {
         return (s == null || s.isBlank()) ? null : s;
     }
 
+    // JSONL-Dateien: relative Pfade zuerst in ./Scanfiles suchen
+    private static Path resolveScanfilePath(Path p) {
+        if (p == null) return null;
+        if (p.isAbsolute() && Files.exists(p)) return p;
+        Path scanDir = defaultScanDir();
+        Path candidate = scanDir.resolve(p);
+        if (Files.exists(candidate)) {
+            return candidate;
+        }
+        return p;
+    }
+
+    // RootStores: relative Pfade zuerst in ./RootStores suchen
+    private static Path resolveRootStorePath(Path p) {
+        if (p == null) return null;
+        if (p.isAbsolute() && Files.exists(p)) return p;
+        Path rootDir = defaultRootStoreDir();
+        ensureDir(rootDir);
+        Path candidate = rootDir.resolve(p);
+        if (Files.exists(candidate)) {
+            return candidate;
+        }
+        return p;
+    }
+
+    // Dateien im Verzeichnis anzeigen:
+    // Vorhandene Dateien:
+    // ./examplefile
+    // ./secondexamplefile
+    private static void printFilesInDir(Path dir, String label) {
+        try {
+            ensureDir(dir);
+            System.out.println("Vorhandene Dateien:");
+
+            boolean any = false;
+            try (var stream = Files.list(dir)) {
+                for (Path p : (Iterable<Path>) stream::iterator) {
+                    if (Files.isRegularFile(p)) {
+                        String relStr = "./" + p.getFileName().toString();
+                        System.out.println(relStr);
+                        any = true;
+                    }
+                }
+            }
+
+            if (!any) {
+                System.out.println("(keine Dateien vorhanden)");
+            }
+
+            System.out.println();
+        } catch (Exception e) {
+            System.out.println("Konnte Dateien nicht auflisten: " + e.getMessage());
+        }
+    }
+
     // ===== Interaktives Menü =====
 
     private static void interactiveMenu() {
+        ensureDir(defaultRootStoreDir());
+
         Scanner in = new Scanner(System.in);
         while (true) {
-            System.out.println("\n=== TLS Cert Analyzer – Menü ===");
+            System.out.println("\n=== TLS Analyzer – Hauptmenü ===");
             System.out.println("1) CT-Stream (WebSocket, CertStream) – passiv");
             System.out.println("2) CT-Poll (HTTP RFC6962) – passiv");
             System.out.println("3) JSONL analysieren");
-            System.out.println("4) TrustStore bewerten");
-            System.out.println("5) Aktiver TLS-Scan (Hosts/IPs)");
+            System.out.println("4) RootStore bewerten");
+            System.out.println("5) Aktiver TLS-Scan (Hosts/IPs, Multi-Port)");
             System.out.println("0) Beenden");
 
             String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4", "5"), null);
@@ -94,7 +155,7 @@ public class Main implements java.util.concurrent.Callable<Integer> {
                 case "1" -> runCtStreamInteractive(in);
                 case "2" -> runCtPollInteractive(in);
                 case "3" -> runAnalyzeInteractive(in);
-                case "4" -> runStoreScoreInteractive(in);
+                case "4" -> runRootStoreInteractive(in);
                 case "5" -> runActiveScanInteractive(in);
                 case "0" -> {
                     System.out.println("Bye.");
@@ -108,6 +169,7 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     private static void runCtStreamInteractive(Scanner in) {
         System.out.println("\n--- CT-Stream (CertStream, passiv) ---");
+
         String outDir = promptFree(in, "Output-Ordner (--out-dir)", defaultScanDir().toString());
         String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs.jsonl");
         boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", false);
@@ -126,6 +188,7 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     private static void runCtPollInteractive(Scanner in) {
         System.out.println("\n--- CT-Poll (passiv, HTTP RFC6962) ---");
+
         String logUrl = promptFree(in, "CT-Log-Basis (--log)", "https://ct.googleapis.com/logs/argon2023");
         long start = readLong(in, "Start-Index (--start)", 0, 0, Long.MAX_VALUE);
         int batch = readInt(in, "Batchgröße (--batch)", 256, 1, 4096);
@@ -148,35 +211,47 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     private static void runAnalyzeInteractive(Scanner in) {
         System.out.println("\n--- Analyse von JSONL ---");
-        String inFile = promptFree(in, "Input-Datei (--input)", defaultOutputPath().toString());
+
+        printFilesInDir(defaultScanDir(), "Scanfiles");
+
+        String inFile = promptFree(in,
+                "Input-Datei (--input, Dateiname relativ zu ./Scanfiles oder absoluter Pfad)",
+                defaultOutputPath().getFileName().toString());
+        Path resolved = resolveScanfilePath(Paths.get(inFile));
         boolean withTs = readYesNo(in, "TrustScores pro Ausstellerland berechnen? [y/N]", false);
-        new Analyzer().processJsonl(inFile, withTs);
+        new Analyzer().processJsonl(resolved.toString(), withTs);
     }
 
-    // --- Interaktiv: Store-Score ---
+    // --- Interaktiv: RootStore-Bewertung ---
 
-    private static void runStoreScoreInteractive(Scanner in) {
-        System.out.println("\n--- TrustStore bewerten ---");
-        String storePath = promptFree(in, "Store-Datei (--store)", defaultJavaCacerts().toString());
+    private static void runRootStoreInteractive(Scanner in) {
+        System.out.println("\n--- RootStore bewerten ---");
+
+        printFilesInDir(defaultRootStoreDir(), "RootStores");
+
+        String storePathStr = promptFree(in,
+                "RootStore-Datei (--store, Dateiname relativ zu ./RootStores oder absoluter Pfad)",
+                defaultJavaCacerts().toString());
         String type = promptFree(in, "Store-Typ (--type)", "jks (jks/pkcs12/pem-bundle/pem-dir)").split(" ")[0];
         String password = promptFree(in, "Store-Passwort (--password, leer=none)", "");
         String countryFrom = promptFree(in, "Land aus 'issuer' oder 'subject'? (--country-from)", "issuer");
         String scores = promptFree(in, "country_trustscores.json (leer = aus Ressourcen)", "");
         boolean includeNonCa = readYesNo(in, "Nicht-CA-Zertifikate mitbewerten? [y/N]", false);
 
+        Path storePath = resolveRootStorePath(Paths.get(storePathStr));
         String scoresPath = emptyToNull(scores);
         try {
             double score = new StoreScorer().scoreStore(
-                    storePath,
+                    storePath.toString(),
                     type,
                     password.isBlank() ? null : password,
                     scoresPath,
                     countryFrom,
                     includeNonCa
             );
-            System.out.printf("Gesamter gewichteter TrustScore: %.6f%n", score);
+            System.out.printf("Gesamter gewichteter RootStore-TrustScore: %.6f%n", score);
         } catch (Exception e) {
-            System.err.println("Fehler bei Store-Bewertung: " + e.getMessage());
+            System.err.println("Fehler bei RootStore-Bewertung: " + e.getMessage());
         }
     }
 
@@ -184,18 +259,45 @@ public class Main implements java.util.concurrent.Callable<Integer> {
 
     private static void runActiveScanInteractive(Scanner in) {
         System.out.println("\n--- Aktiver TLS-Scan ---");
+
+        printFilesInDir(defaultScanDir(), "Scanfiles (bisherige Scan-Outputs)");
+
         String inlineTargets = promptFree(in,
-                "Ziele als Liste (kommagetrennt, host oder host:port) [leer = nur Datei]",
+                "Ziele als Liste (kommagetrennt, host oder host:port) [leer = nur Datei/CIDR/Range]",
                 "");
         String targetsFile = promptFree(in,
                 "Optional: Datei mit Zielen (eine pro Zeile, host oder host:port) [leer = keine]",
                 "");
-        int port = readInt(in, "Standardport, falls nicht im Ziel angegeben", 443, 1, 65535);
+        String cidr = promptFree(in,
+                "Optional: eine CIDR-Range, z.B. 203.0.113.0/24 [leer = keine]",
+                "");
+        String ipRange = promptFree(in,
+                "Optional: ein IP-Range, z.B. 203.0.113.10-203.0.113.200 [leer = keine]",
+                "");
+        String portsCsv = promptFree(in,
+                "Ports (kommagetrennt, z.B. 443,8443,993) [leer = 443]",
+                "");
+        String profile = promptFree(in,
+                "Port-Profil (web/mail/k8s) [leer = keins]",
+                "");
+        int timeoutMs = readInt(in, "Timeout pro Ziel (ms)", 5000, 100, 60000);
+        int concurrency = readInt(in, "Parallele Verbindungen (concurrency)", 50, 1, 1000);
+        String rateStr = promptFree(in,
+                "Rate-Limit Verbindungen/Sekunde [leer = kein Limit]",
+                "");
         String outDir = promptFree(in, "Output-Ordner (--output)", defaultScanDir().toString());
         String outFile = promptFree(in, "Output-Dateiname", "active_scan.jsonl");
-        int timeoutMs = readInt(in, "Timeout pro Ziel (ms)", 5000, 100, 60000);
         String scores = promptFree(in, "country_trustscores.json (leer = aus Ressourcen)", "");
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
+
+        Double ratePerSecond = null;
+        if (!rateStr.isBlank()) {
+            try {
+                ratePerSecond = Double.parseDouble(rateStr.trim());
+            } catch (NumberFormatException e) {
+                System.err.println("Ungültige Rate, ignoriere Rate-Limit.");
+            }
+        }
 
         List<String> targets = new ArrayList<>();
         if (!inlineTargets.isBlank()) {
@@ -219,9 +321,52 @@ public class Main implements java.util.concurrent.Callable<Integer> {
             }
         }
 
+        if (!cidr.isBlank()) {
+            System.out.println("Hinweis: CIDR im interaktiven Modus wird nicht expandiert. " +
+                    "Nutze dafür besser den CLI-Befehl 'scan --cidr ...'.");
+        }
+        if (!ipRange.isBlank()) {
+            System.out.println("Hinweis: IP-Range im interaktiven Modus wird nicht expandiert. " +
+                    "Nutze dafür besser den CLI-Befehl 'scan --ip-range ...'.");
+        }
+
         if (targets.isEmpty()) {
             System.out.println("Keine Ziele angegeben – Scan wird abgebrochen.");
             return;
+        }
+
+        List<Integer> ports = new ArrayList<>();
+        if (!portsCsv.isBlank()) {
+            for (String part : portsCsv.split(",")) {
+                String s = part.trim();
+                if (s.isEmpty()) continue;
+                try {
+                    ports.add(Integer.parseInt(s));
+                } catch (NumberFormatException ignored) { }
+            }
+        }
+        if (ports.isEmpty()) {
+            if (!profile.isBlank()) {
+                switch (profile.toLowerCase(Locale.ROOT)) {
+                    case "web" -> {
+                        ports.add(443);
+                        ports.add(8443);
+                    }
+                    case "mail" -> {
+                        ports.add(465);
+                        ports.add(587);
+                        ports.add(993);
+                        ports.add(995);
+                    }
+                    case "k8s" -> ports.add(6443);
+                    default -> {
+                        System.err.println("Unbekanntes Profil '" + profile + "', nutze 443.");
+                        ports.add(443);
+                    }
+                }
+            } else {
+                ports.add(443);
+            }
         }
 
         Path outPath = Paths.get(outDir).resolve(outFile);
@@ -230,7 +375,17 @@ public class Main implements java.util.concurrent.Callable<Integer> {
         String scoresPath = emptyToNull(scores);
 
         try {
-            new ActiveScanner().scan(targets, port, outPath, scoresPath, debug, timeoutMs);
+            new ActiveScanner().scan(
+                    targets,
+                    ports,
+                    outPath,
+                    scoresPath,
+                    debug,
+                    timeoutMs,
+                    concurrency,
+                    ratePerSecond,
+                    null
+            );
         } catch (Exception e) {
             System.err.println("Fehler beim aktiven Scan: " + e.getMessage());
         }
@@ -331,8 +486,11 @@ public class Main implements java.util.concurrent.Callable<Integer> {
     @Command(name = "ct-poll", description = "Liest CT-Logs via HTTP (RFC6962 get-entries) und schreibt JSONL.")
     static class CtPollCommand implements java.util.concurrent.Callable<Integer> {
 
-        @Option(names = {"--log"}, required = true,
-                description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023")
+        @Option(
+                names = {"--log"},
+                required = true,
+                description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023"
+        )
         String logUrl;
 
         @Option(names = {"--start"}, description = "Startindex (default 0)")
