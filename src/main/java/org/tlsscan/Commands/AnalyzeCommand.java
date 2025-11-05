@@ -7,15 +7,18 @@ import picocli.CommandLine.Option;
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
-@Command(name = "analyze", description = "Analysiert JSONL (aus ct-stream/ct-poll).")
+@Command(
+        name = "analyze",
+        description = "Analysiert JSONL (aus ct-stream / ct-poll / scan)."
+)
 public class AnalyzeCommand implements Callable<Integer> {
 
-    @Option(names={"-i","--input"}, required=true,
-            description="Input JSONL Datei (ct-stream/ct-poll Output)")
+    @Option(names = {"-i", "--input"}, required = true,
+            description = "Input JSONL Datei (ct-stream/ct-poll/scan Output)")
     Path input;
 
-    @Option(names={"--trusted-by-country"},
-            description="Zählt vertrauenswürdige Leaf-Zertifikate pro Land (lokaler Truststore).")
+    @Option(names = {"--trusted-by-country"},
+            description = "Berechnet zusätzlich TrustScores pro Ausstellerland (country_trustscores.json).")
     boolean trustedByCountry = false;
 
     @Override
