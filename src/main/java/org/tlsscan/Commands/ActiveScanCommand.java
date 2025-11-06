@@ -12,237 +12,209 @@ import java.util.concurrent.Callable;
 
 @Command(
         name = "scan",
-        description = "Aktiver TLS-Scan von Hostnamen/IPs; unterstützt Multi-Port, CIDR, IP-Ranges und erweiterte Metadaten."
+        description = {
+                "Aktiver TLS-Scan von Hosts und IP-Adressen mit optionalen GeoIP-Filtern.",
+                "Beispiele:",
+                "  passive-cert-analyzer scan -t google.com --profile web",
+                "  passive-cert-analyzer scan --random-sample-count 10000 --countries AT --profile web",
+                "  passive-cert-analyzer scan --country-full AT --profile web"
+        }
 )
 public class ActiveScanCommand implements Callable<Integer> {
 
-    @Option(names = {"-t", "--target"},
-            description = "Ziel (Hostname oder IP, optional host:port). Kann mehrfach angegeben werden.")
-    List<String> targets;
+    private static final int DEFAULT_TIMEOUT_MS = 15000;
+    private static final int DEFAULT_CONCURRENCY = 50;
 
-    @Option(names = {"-f", "--targets-file"},
-            description = "Datei mit Zielen, eine pro Zeile (Hostname, IP oder host:port).")
-    Path targetsFile;
+    private static Path defaultOutputDir() {
+        return Paths.get(System.getProperty("user.dir")).resolve("Scanfiles");
+    }
 
-    @Option(names = {"--cidr"},
-            description = "IPv4-CIDR-Range, z.B. 192.0.2.0/24. Kann mehrfach angegeben werden.")
-    List<String> cidrs;
-
-    @Option(names = {"--ip-range"},
-            description = "IPv4-Range, z.B. 192.0.2.10-192.0.2.200. Kann mehrfach angegeben werden.")
-    List<String> ipRanges;
-
-    @Option(names = {"-p", "--port"},
-            description = "Einzelner Standardport (falls keine --ports angegeben).")
-    Integer port;
-
-    @Option(names = {"--ports"},
-            description = "Kommagetrennte Liste von Ports, z.B. 443,8443,993.")
-    String portsCsv;
+    @Option(names = {"-t", "--targets"},
+            description = "Ziele (Hostname/IP oder host:port, kommagetrennt)",
+            split = ",")
+    List<String> targets = new ArrayList<>();
 
     @Option(names = {"--profile"},
-            description = "Port-Profil: z.B. web, mail, k8s. Ergänzt die Ports-Liste.")
+            description = "Port-Profil: web (443), mail (465,587,993,995), k8s (6443), custom (nur --ports)",
+            defaultValue = "web")
     String profile;
 
-    @Option(names = {"-o", "--output"},
-            description = "Output JSONL Datei (default: ./Scanfiles/active_scan.jsonl).")
-    Path output;
+    @Option(names = {"--ports"},
+            description = "Ports bei Profil=custom, z.B. 443,8443",
+            split = ",")
+    List<Integer> customPorts = new ArrayList<>();
 
-    @Option(names = {"--timeout-ms"},
-            description = "Timeout pro Ziel in Millisekunden (default: 5000).")
-    int timeoutMs = 5000;
+    @Option(names = {"--random-sample-count"},
+            description = "Anzahl zufälliger IPs (0 = keine Zufallsstichprobe)",
+            defaultValue = "0")
+    int randomSampleCount;
 
-    @Option(names = {"--country-scores"},
-            description = "Pfad zu country_trustscores.json (default: Ressource auf dem Classpath).")
-    Path countryScores;
+    @Option(names = {"--sample-cidr"},
+            description = "CIDR für Zufallsstichprobe (z.B. 0.0.0.0/0, 193.0.0.0/8)")
+    String sampleCidr;
+
+    @Option(names = {"--countries"},
+            description = "Filter auf Länder-ISO-Codes (z.B. AT,DE,US), basierend auf GeoLite2",
+            split = ",")
+    List<String> countries = new ArrayList<>();
+
+    @Option(names = {"--cities"},
+            description = "Filter auf Städtenamen (z.B. Vienna,Munich), basierend auf GeoLite2 City",
+            split = ",")
+    List<String> cities = new ArrayList<>();
+
+    @Option(names = {"--asns"},
+            description = "ASN-Filter (z.B. 680,3320), basierend auf GeoLite2 ASN",
+            split = ",")
+    List<Long> asns = new ArrayList<>();
+
+    // Vollständiger Länderscan (ein Host pro GeoLite2-IPv4-Netzblock)
+    @Option(names = {"--country-full"},
+            description = "Vollständiger Scan aller GeoLite2-IPv4-Netzblöcke für diese Länder (ISO-Codes, z.B. AT,DE)",
+            split = ",")
+    List<String> fullCountries = new ArrayList<>();
+
+    @Option(names = {"--geoip-country-db"},
+            description = "Pfad zur GeoIP Country-DB (Default: ./GeoIP/GeoLite2-Country.mmdb)")
+    Path geoipCountryDb;
+
+    @Option(names = {"--geoip-asn-db"},
+            description = "Pfad zur GeoIP ASN-DB (Default: ./GeoIP/GeoLite2-ASN.mmdb)")
+    Path geoipAsnDb;
+
+    @Option(names = {"--geoip-city-db"},
+            description = "Pfad zur GeoIP City-DB (Default: ./GeoIP/GeoLite2-City.mmdb)")
+    Path geoipCityDb;
+
+    @Option(names = {"-o", "--out-file"},
+            description = "Dateiname im Output-Ordner ./Scanfiles (default: active_scan.jsonl)",
+            defaultValue = "active_scan.jsonl")
+    String outFileName;
 
     @Option(names = {"--debug"},
             description = "Debug-Logging aktivieren.")
-    boolean debug = false;
-
-    @Option(names = {"--concurrency"},
-            description = "Anzahl paralleler Verbindungen (default: 50).")
-    int concurrency = 50;
-
-    @Option(names = {"--rate-per-second"},
-            description = "Maximale Anzahl neuer Verbindungen pro Sekunde (soft rate limit).")
-    Double ratePerSecond;
-
-    @Option(names = {"--scan-run-id"},
-            description = "Optionaler Identifier für diesen Scan-Run (default: zufällige UUID).")
-    String scanRunId;
+    boolean debug;
 
     @Override
     public Integer call() throws Exception {
-        List<String> allTargets = new ArrayList<>();
 
-        if (targets != null) {
-            allTargets.addAll(targets);
+        if ((targets == null || targets.isEmpty()) &&
+                randomSampleCount <= 0 &&
+                (fullCountries == null || fullCountries.isEmpty())) {
+            System.err.println("Es wurden weder Ziele (--targets), noch eine Zufallsstichprobe (--random-sample-count), noch ein Vollscan (--country-full) angegeben.");
+            return 1;
         }
 
-        if (targetsFile != null) {
-            if (!Files.exists(targetsFile)) {
-                System.err.println("Targets-Datei existiert nicht: " + targetsFile);
-                return 2;
+        List<Integer> ports = new ArrayList<>();
+        switch (profile) {
+            case "web" -> {
+                ports.add(443);
             }
-            for (String line : Files.readAllLines(targetsFile)) {
-                String s = line.trim();
-                if (s.isEmpty() || s.startsWith("#")) {
-                    continue;
+            case "mail" -> {
+                ports.add(465);
+                ports.add(587);
+                ports.add(993);
+                ports.add(995);
+            }
+            case "k8s" -> ports.add(6443);
+            case "custom" -> {
+                if (customPorts == null || customPorts.isEmpty()) {
+                    System.err.println("Profil 'custom' verlangt --ports=<Liste>.");
+                    return 2;
                 }
-                allTargets.add(s);
+                ports.addAll(customPorts);
+            }
+            default -> {
+                System.err.println("Unbekanntes Profil: " + profile + " (erlaubt: web,mail,k8s,custom)");
+                return 3;
             }
         }
 
-        // CIDR & IP-Ranges expandieren
-        if (cidrs != null) {
-            for (String cidr : cidrs) {
-                expandCidr(cidr, allTargets);
+        Path outDir = defaultOutputDir();
+        if (!Files.exists(outDir)) {
+            Files.createDirectories(outDir);
+        }
+        Path outputFile = outDir.resolve(outFileName);
+
+        System.out.println("[scan] Output: " + outputFile);
+        System.out.println("[scan] Timeout pro Ziel = " + DEFAULT_TIMEOUT_MS + " ms, Parallelität = " + DEFAULT_CONCURRENCY);
+
+        Path geoipBase = Paths.get(System.getProperty("user.dir")).resolve("GeoIP");
+        ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
+
+        if (geoipCountryDb != null) {
+            adv.geoipCountryDbPath = geoipCountryDb.toString();
+        } else {
+            Path def = geoipBase.resolve("GeoLite2-Country.mmdb");
+            if (Files.exists(def)) adv.geoipCountryDbPath = def.toString();
+        }
+        if (geoipAsnDb != null) {
+            adv.geoipAsnDbPath = geoipAsnDb.toString();
+        } else {
+            Path def = geoipBase.resolve("GeoLite2-ASN.mmdb");
+            if (Files.exists(def)) adv.geoipAsnDbPath = def.toString();
+        }
+        if (geoipCityDb != null) {
+            adv.geoipCityDbPath = geoipCityDb.toString();
+        } else {
+            Path def = geoipBase.resolve("GeoLite2-City.mmdb");
+            if (Files.exists(def)) adv.geoipCityDbPath = def.toString();
+        }
+
+        if (countries != null) {
+            for (String c : countries) {
+                if (c != null && !c.isBlank()) {
+                    adv.countryIsoCodes.add(c.trim().toUpperCase(Locale.ROOT));
+                }
             }
         }
-        if (ipRanges != null) {
-            for (String range : ipRanges) {
-                expandIpRange(range, allTargets);
+        if (cities != null) {
+            for (String city : cities) {
+                if (city != null && !city.isBlank()) {
+                    adv.cityNames.add(city.trim());
+                }
+            }
+        }
+        if (asns != null) {
+            adv.asns.addAll(asns);
+        }
+
+        if (fullCountries != null) {
+            for (String c : fullCountries) {
+                if (c != null && !c.isBlank()) {
+                    adv.fullScanCountries.add(c.trim().toUpperCase(Locale.ROOT));
+                }
             }
         }
 
-        if (allTargets.isEmpty()) {
-            System.err.println("Keine Ziele: mindestens --target, --targets-file, --cidr oder --ip-range angeben.");
-            return 2;
+        // CSV für Vollscan
+        Path blocksCsv = geoipBase.resolve("GeoLite2-Country-Blocks-IPv4.csv");
+        Path locCsv = geoipBase.resolve("GeoLite2-Country-Locations-en.csv");
+        if (Files.exists(blocksCsv)) {
+            adv.countryBlocksCsvPath = blocksCsv.toString();
+        }
+        if (Files.exists(locCsv)) {
+            adv.countryLocationsCsvPath = locCsv.toString();
         }
 
-        List<Integer> ports = buildPorts(port, portsCsv, profile);
+        adv.randomSampleCount = randomSampleCount;
+        if (sampleCidr != null && !sampleCidr.isBlank()) {
+            adv.sampleFromCidr = sampleCidr.trim();
+        }
 
-        Path out = (output != null)
-                ? output
-                : Paths.get("Scanfiles").resolve("active_scan.jsonl");
+        ActiveScanner scanner = new ActiveScanner();
+        scanner.scan(
+                targets != null ? targets : Collections.emptyList(),
+                ports,
+                outputFile,
+                null,
+                debug,
+                DEFAULT_TIMEOUT_MS,
+                DEFAULT_CONCURRENCY,
+                null,
+                adv
+        );
 
-        String scoresPath = (countryScores != null) ? countryScores.toString() : null;
-
-        new ActiveScanner().scan(allTargets, ports, out, scoresPath, debug, timeoutMs,
-                concurrency, ratePerSecond, scanRunId);
         return 0;
-    }
-
-    private List<Integer> buildPorts(Integer singlePort, String portsCsv, String profile) {
-        Set<Integer> set = new LinkedHashSet<>();
-
-        if (portsCsv != null && !portsCsv.isBlank()) {
-            for (String part : portsCsv.split(",")) {
-                String s = part.trim();
-                if (s.isEmpty()) continue;
-                try {
-                    set.add(Integer.parseInt(s));
-                } catch (NumberFormatException ignored) { }
-            }
-        } else if (singlePort != null) {
-            set.add(singlePort);
-        }
-
-        if (profile != null && !profile.isBlank()) {
-            String p = profile.toLowerCase(Locale.ROOT);
-            switch (p) {
-                case "web" -> {
-                    set.add(443);
-                    set.add(8443);
-                }
-                case "mail" -> {
-                    set.add(465);
-                    set.add(587);
-                    set.add(993);
-                    set.add(995);
-                }
-                case "k8s" -> set.add(6443);
-                default -> System.err.println("Unbekanntes Profil '" + profile + "', ignoriere.");
-            }
-        }
-
-        if (set.isEmpty()) {
-            set.add(443); // default
-        }
-
-        return new ArrayList<>(set);
-    }
-
-    private void expandCidr(String cidr, List<String> out) {
-        if (cidr == null || cidr.isBlank()) return;
-        cidr = cidr.trim();
-        try {
-            String[] parts = cidr.split("/");
-            if (parts.length != 2) {
-                System.err.println("Ungültiges CIDR: " + cidr);
-                return;
-            }
-            String baseIp = parts[0];
-            int prefix = Integer.parseInt(parts[1]);
-            if (prefix < 0 || prefix > 32) {
-                System.err.println("Ungültiger Präfix in CIDR: " + cidr);
-                return;
-            }
-            long base = ipv4ToLong(baseIp);
-            long mask = prefix == 0 ? 0 : ~((1L << (32 - prefix)) - 1) & 0xffffffffL;
-            long network = base & mask;
-            long hosts = 1L << (32 - prefix);
-
-            // Warnung bei sehr großen Ranges
-            if (hosts > 65536) {
-                System.err.println("Warnung: CIDR " + cidr + " umfasst " + hosts +
-                        " Adressen – Expansion kann sehr lange dauern.");
-            }
-
-            for (long i = 0; i < hosts; i++) {
-                out.add(longToIpv4(network + i));
-            }
-        } catch (Exception e) {
-            System.err.println("Fehler beim Expandieren von CIDR '" + cidr + "': " + e.getMessage());
-        }
-    }
-
-    private void expandIpRange(String range, List<String> out) {
-        if (range == null || range.isBlank()) return;
-        range = range.trim();
-        try {
-            String[] parts = range.split("-");
-            if (parts.length != 2) {
-                System.err.println("Ungültiger IP-Range: " + range);
-                return;
-            }
-            long start = ipv4ToLong(parts[0].trim());
-            long end = ipv4ToLong(parts[1].trim());
-            if (end < start) {
-                System.err.println("IP-Range mit end < start: " + range);
-                return;
-            }
-            long count = (end - start) + 1;
-            if (count > 65536) {
-                System.err.println("Warnung: IP-Range " + range + " umfasst " + count +
-                        " Adressen – Expansion kann sehr lange dauern.");
-            }
-            for (long v = start; v <= end; v++) {
-                out.add(longToIpv4(v));
-            }
-        } catch (Exception e) {
-            System.err.println("Fehler beim Expandieren von IP-Range '" + range + "': " + e.getMessage());
-        }
-    }
-
-    private long ipv4ToLong(String ip) {
-        String[] parts = ip.trim().split("\\.");
-        if (parts.length != 4) throw new IllegalArgumentException("Ungültige IPv4-Adresse: " + ip);
-        long res = 0;
-        for (String part : parts) {
-            int v = Integer.parseInt(part);
-            if (v < 0 || v > 255) throw new IllegalArgumentException("Ungültiges IPv4-Byte: " + part);
-            res = (res << 8) | v;
-        }
-        return res;
-    }
-
-    private String longToIpv4(long val) {
-        return String.format("%d.%d.%d.%d",
-                (val >> 24) & 0xff,
-                (val >> 16) & 0xff,
-                (val >> 8) & 0xff,
-                val & 0xff);
     }
 }
