@@ -33,15 +33,18 @@ public class Main implements Callable<Integer> {
                     .execute(args);
             System.exit(exit);
         } else {
-            interactiveMenu();
+            new Main().runInteractive();
         }
     }
 
     @Override
     public Integer call() {
-        System.out.println("Subcommands: 'scan' (aktiver TLS-Scan), 'ct-stream', 'ct-poll', 'analyze', 'store-score'.");
-        System.out.println("Ohne Argumente startet das interaktive Menü (aktiver + passiver Betrieb).");
+        runInteractive();
         return 0;
+    }
+
+    private void runInteractive() {
+        interactiveMenu();
     }
 
     private static Path projectRoot() {
@@ -145,30 +148,26 @@ public class Main implements Callable<Integer> {
             }
             case "k8s" -> ports.add(6443);
             case "custom" -> {
-                String pStr = promptFree(in, "Ports, kommagetrennt (z.B. 443,8443)", "443");
-                String[] pParts = pStr.split(",");
-                for (String pp : pParts) {
-                    String s = pp.trim();
-                    if (!s.isEmpty()) {
-                        try {
-                            ports.add(Integer.parseInt(s));
-                        } catch (NumberFormatException e) {
-                            System.out.println("Ignoriere ungültigen Port: " + s);
-                        }
+                String pStr = promptFree(in, "Ports, kommasepariert", "443");
+                for (String ps : pStr.split(",")) {
+                    ps = ps.trim();
+                    if (ps.isEmpty()) continue;
+                    try {
+                        ports.add(Integer.parseInt(ps));
+                    } catch (NumberFormatException e) {
+                        System.out.println("Ignoriere ungültigen Port: " + ps);
                     }
                 }
                 if (ports.isEmpty()) {
+                    System.out.println("Keine gültigen Ports – verwende Port 443.");
                     ports.add(443);
                 }
             }
         }
 
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
-        adv.randomSampleCount = 0;          // hier keine Zufallsstichprobe
-        adv.fullScanCountries = List.of();  // kein Länderscan
-        adv.enableCountryFullScan = false;
 
-        // GeoIP-MMDBs (falls vorhanden) – für Metadaten, Filter etc.
+        // Optional: Geo-Infos aus MMDB (nur zur Anreicherung / Filterung, nicht für Zielerzeugung)
         Path geoipDir = projectRoot().resolve("GeoIP");
         Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
         Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
@@ -204,7 +203,7 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    // --- 2) Geo-Länderscan -----------------------------------------------------------------
+    // --- 2) Länderscan (GeoLite2) ---------------------------------------------------------
 
     private static void runCountryScanInteractive(Scanner in) {
         System.out.println("\n--- Geo-Länderscan (GeoLite2) ---");
@@ -223,59 +222,26 @@ public class Main implements Callable<Integer> {
         String isoStr = promptFree(in,
                 "Länder-ISO-Codes (z.B. AT,DE,US – leer = alle Länder in GeoLite2)",
                 "");
-        List<String> isoCodes = new ArrayList<>();
+        List<String> isoList = new ArrayList<>();
         if (isoStr != null && !isoStr.isBlank()) {
             for (String c : isoStr.split(",")) {
-                String s = c.trim();
-                if (!s.isEmpty()) {
-                    isoCodes.add(s.toUpperCase(Locale.ROOT));
-                }
+                c = c.trim().toUpperCase(Locale.ROOT);
+                if (!c.isEmpty()) isoList.add(c);
             }
         }
 
-        String profile = readChoice(in,
-                "Port-Profil [web|mail|k8s|custom]",
-                Set.of("web", "mail", "k8s", "custom"),
-                "web");
-        List<Integer> ports = new ArrayList<>();
-        switch (profile) {
-            case "web" -> ports.add(443);
-            case "mail" -> {
-                ports.add(465);
-                ports.add(587);
-                ports.add(993);
-                ports.add(995);
-            }
-            case "k8s" -> ports.add(6443);
-            case "custom" -> {
-                String pStr = promptFree(in, "Ports, kommagetrennt (z.B. 443,8443)", "443");
-                String[] pParts = pStr.split(",");
-                for (String pp : pParts) {
-                    String s = pp.trim();
-                    if (!s.isEmpty()) {
-                        try {
-                            ports.add(Integer.parseInt(s));
-                        } catch (NumberFormatException e) {
-                            System.out.println("Ignoriere ungültigen Port: " + s);
-                        }
-                    }
-                }
-                if (ports.isEmpty()) {
-                    ports.add(443);
-                }
-            }
-        }
+        int randomCount = (int) readLong(in,
+                "Zufallsstichprobe: Anzahl Hosts aus Country-Blocks-CSV (0 = keine Stichprobe)",
+                0, 0, 1_000_000);
 
-        long sampleCount = readLong(in,
-                "Zufällige Basis-IP-Adressen aus GeoLite2 (0 = keine Zufallsstichprobe)",
-                0, 0, Integer.MAX_VALUE);
-        int randomSampleCount = (int) sampleCount;
-
-        boolean doFull = readYesNo(in,
-                "Zusätzlich alle IPv4-Netzblöcke der Länder (ein Host pro Netzblock) scannen? [y/N]",
+        boolean enableFullScan = readYesNo(in,
+                "Vollständiger Länderscan (ein Host pro Netzblock) aktivieren? [y/N]",
                 false);
 
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
+        adv.randomSampleCount = randomCount;
+        adv.enableCountryFullScan = enableFullScan;
+        adv.countryIsoCodes = isoList;
 
         Path geoipDir = projectRoot().resolve("GeoIP");
 
@@ -313,33 +279,13 @@ public class Main implements Callable<Integer> {
             adv.cityLocationsCsvPath = cityLocCsv.toString();
         }
 
-        // ASN-CSV (optional)
-        Path asnBlocksCsv = geoipDir.resolve("GeoLite2-ASN-Blocks-IPv4.csv");
-        if (Files.exists(asnBlocksCsv)) {
-            adv.asnBlocksCsvPath = asnBlocksCsv.toString();
-        }
-
-        if (!isoCodes.isEmpty()) {
-            adv.countryIsoCodes.addAll(isoCodes);
-            if (doFull) {
-                adv.fullScanCountries.addAll(isoCodes);  // Vollscan nur für diese Länder
-            }
-        } else if (doFull) {
-            // Vollscan über ALLE Länder (kein ISO-Filter)
-            adv.fullScanCountries = new ArrayList<>();  // bleibt leer -> Scanner interpretiert das als "alle"
-        }
-
-        adv.randomSampleCount = randomSampleCount;
-        adv.sampleFromCidr = null;
-        adv.enableCountryFullScan = doFull;
-
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
         ActiveScanner scanner = new ActiveScanner();
         try {
             scanner.scan(
-                    Collections.emptyList(), // keine direkten Targets – alles kommt aus GeoLite2
-                    ports,
+                    Collections.emptyList(),   // keine direkten Ziele
+                    Collections.singletonList(443),
                     outputFile,
                     null,
                     debug,
@@ -354,18 +300,23 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    // --- 3) CT-Stream ----------------------------------------------------------------------
+    // --- 3) CT-Stream ---------------------------------------------------------------------
 
     private static void runCtStreamInteractive(Scanner in) {
-        System.out.println("\n--- CT-Stream (passiv, via certstream-java) ---");
-        String outDir = promptFree(in, "Output-Ordner (--out-dir)", defaultScanDir().toString());
-        String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs.jsonl");
-        boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [y/N]", false);
-        long duration = readLong(in, "Dauer in Sekunden (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-        long maxEvents = readLong(in, "Max. Events (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
+        System.out.println("\n--- CT-Stream (CertStream, WebSocket) ---");
+        Path outDir = defaultScanDir();
+        ensureDir(outDir);
+
+        String outFileName = promptFree(in,
+                "Output-Dateiname (ohne Pfad)",
+                "certs_stream.jsonl");
+        Path outPath = outDir.resolve(outFileName);
+
+        boolean certOnly = readYesNo(in, "Nur reduzierte Cert-Felder speichern? [y/N]", false);
+        long duration = readLong(in, "Maximale Laufzeit in Sekunden (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
+        long maxEvents = readLong(in, "Max. Anzahl Events (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
-        Path outPath = Paths.get(outDir).resolve(outFile);
         ensureDir(outPath.getParent());
 
         System.out.println("Hinweis: Nutzung öffentlicher CT-Feeds über CertStream (passiv).");
@@ -381,62 +332,112 @@ public class Main implements Callable<Integer> {
         int batch = (int) readLong(in, "Batchgröße (--batch, 1-4096)", 256, 1, 4096);
         int sleepMs = (int) readLong(in, "Pause zwischen Batches in ms (--sleep-ms)", 500, 0, 60000);
         long maxEntries = readLong(in, "Maximal Einträge (--max-entries, 0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-        String outDir = promptFree(in, "Output-Ordner (--out-dir)", defaultScanDir().toString());
-        String outFile = promptFree(in, "Output-Dateiname (--out-file)", "certs_poll.jsonl");
-        boolean certOnly = readYesNo(in, "Nur reduzierte Felder speichern? [Y/n]", true);
-        boolean noProgress = readYesNo(in, "Ohne Live-Progress? [y/N]", false);
+
+        Path outDir = defaultScanDir();
+        ensureDir(outDir);
+
+        String outFileName = promptFree(in,
+                "Output-Dateiname (ohne Pfad)",
+                "certs_poll.jsonl");
+        Path output = outDir.resolve(outFileName);
+
+        boolean certOnly = readYesNo(in, "Nur reduzierte Zertifikatsfelder speichern? [y/N]", true);
+        boolean noProgress = readYesNo(in, "Fortschrittsanzeige unterdrücken? [y/N]", false);
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
-        Path outPath = Paths.get(outDir).resolve(outFile);
-        ensureDir(outPath.getParent());
-
-        CtPoller poller = new CtPoller(outPath, certOnly, !noProgress, debug);
-        poller.run(logUrl, start, batch, sleepMs, maxEntries);
+        try {
+            CtPoller poller = new CtPoller(
+                    logUrl,
+                    start,
+                    batch,
+                    sleepMs,
+                    maxEntries,
+                    output,
+                    certOnly,
+                    noProgress,
+                    debug
+            );
+            poller.run();
+            System.out.println("\nCT-Poll abgeschlossen. Ergebnisse: " + output);
+        } catch (Exception e) {
+            System.err.println("Fehler beim CT-Poll: " + e.getMessage());
+        }
     }
 
-    // --- 5) Analyse ------------------------------------------------------------------------
+    // --- 5) Analyzer ----------------------------------------------------------------------
 
     private static void runAnalyzeInteractive(Scanner in) {
-        System.out.println("\n--- JSONL analysieren ---");
-        String inputPath = promptFree(in, "Input-JSONL-Datei (--input)", defaultOutputPath().toString());
-        Path input = Paths.get(inputPath);
-        if (!Files.exists(input)) {
-            System.err.println("Datei existiert nicht: " + input);
+        System.out.println("\n--- JSONL Analyse ---");
+        String fileName = promptFree(in,
+                "Input-Datei (relativ zu ./Scanfiles oder absolut)",
+                "certs.jsonl");
+        Path inPath = Paths.get(fileName);
+        if (!inPath.isAbsolute()) {
+            inPath = defaultScanDir().resolve(fileName);
+        }
+
+        if (!Files.exists(inPath)) {
+            System.err.println("Datei existiert nicht: " + inPath);
             return;
         }
-        boolean trustedByCountry = readYesNo(in, "Vertrauensprüfung (lokaler Truststore) & Ländercounts ausgeben? [y/N]", false);
+
+        String scoreFile = promptFree(in,
+                "Path zu country_trustscores.json (leer = Default aus Ressourcen)",
+                "");
+        scoreFile = emptyToNull(scoreFile);
+
+        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
+
         Analyzer analyzer = new Analyzer();
-        analyzer.processJsonl(input.toString(), trustedByCountry);
+        try {
+            analyzer.analyze(
+                    inPath,
+                    scoreFile,
+                    debug
+            );
+        } catch (Exception e) {
+            System.err.println("Fehler bei Analyse: " + e.getMessage());
+        }
     }
 
-    // --- 6) StoreScore ---------------------------------------------------------------------
+    // --- 6) RootStore-Score ---------------------------------------------------------------
 
     private static void runStoreScoreInteractive(Scanner in) {
-        System.out.println("\n--- Store bewerten (offline) ---");
-        String store = promptFree(in, "Pfad zum TrustStore (JKS/PKCS12) oder PEM (Bundle/Dir)", defaultJavaCacerts().toString());
-        String type = readChoice(in, "Typ [jks|pkcs12|pem-bundle|pem-dir]", Set.of("jks", "pkcs12", "pem-bundle", "pem-dir"), "jks");
-        String password = null;
-        if (type.equals("jks") || type.equals("pkcs12")) {
-            password = promptFree(in, "Passwort (leer = none)", type.equals("jks") ? "changeit" : "");
-        }
-        String countryScores = promptFree(in, "Pfad zur country_trustscores.json", "country_trustscores.json");
-        String countryFrom = readChoice(in, "Länderquelle [subject|issuer]", Set.of("subject", "issuer"), "subject");
-        boolean includeNonCa = readYesNo(in, "Auch Nicht-CA-Zertifikate berücksichtigen? [y/N]", false);
+        System.out.println("\n--- TrustStore-Score ---");
+        String storePathStr = promptFree(in,
+                "Pfad zum RootStore (Java keystore, z.B. cacerts)",
+                defaultJavaCacerts().toString());
 
+        Path storePath = Paths.get(storePathStr);
+        if (!Files.exists(storePath)) {
+            System.err.println("Datei existiert nicht: " + storePath);
+            return;
+        }
+
+        String password = promptFree(in,
+                "Passwort für den Store (leer = 'changeit')",
+                "changeit");
+
+        String scoresFile = promptFree(in,
+                "Path zu country_trustscores.json (leer = Default aus Ressourcen)",
+                "");
+
+        scoresFile = emptyToNull(scoresFile);
+
+        StoreScorer scorer = new StoreScorer();
         try {
-            StoreScorer scorer = new StoreScorer();
-            double score = scorer.scoreStore(
-                    store, type, emptyToNull(password), countryScores, countryFrom, includeNonCa
+            scorer.scoreStore(
+                    storePath,
+                    password.toCharArray(),
+                    scoresFile
             );
-            System.out.printf("%n===> Gesamter gewichteter TrustScore: %.6f%n", score);
         } catch (Exception e) {
-            System.err.println("Fehler: " + e.getMessage());
+            System.err.println("Fehler beim Bewerten des Stores: " + e.getMessage());
         }
     }
 
-    // --- CT-Subcommands für CLI -----------------------------------------------------------
+    // --- Unterkommandos für picocli CLI ---------------------------------------------------
 
-    @Command(name = "ct-stream", description = "Liest öffentliche CT-Events via certstream-java und schreibt JSONL.")
     static class CtStreamCommand implements Callable<Integer> {
         @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
         Path outDir = defaultScanDir();
@@ -453,6 +454,7 @@ public class Main implements Callable<Integer> {
 
         @Override
         public Integer call() {
+            ensureDir(outDir);
             Path outPath = outDir.resolve(outFile);
             ensureDir(outPath.getParent());
             new CertStreamClient(outPath, certOnly, durationSeconds, maxEvents, debug, true).run();
@@ -460,13 +462,12 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    @Command(name = "ct-poll", description = "Liest CT-Logs via HTTP (RFC6962 get-entries) und schreibt JSONL.")
     static class CtPollCommand implements Callable<Integer> {
         @Option(names = {"--log"}, required = true, description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023")
-        String logUrl;
+        String logBase;
         @Option(names = {"--start"}, description = "Startindex (default 0)")
         long start = 0;
-        @Option(names = {"--batch"}, description = "Batchgröße (1-4096, default 256)")
+        @Option(names = {"--batch"}, description = "Batchgröße (default 256, max 4096)")
         int batch = 256;
         @Option(names = {"--sleep-ms"}, description = "Pause zwischen Batches in ms (default 500)")
         int sleepMs = 500;
@@ -486,54 +487,53 @@ public class Main implements Callable<Integer> {
         boolean debug = false;
 
         @Override
-        public Integer call() {
-            if (batch < 1 || batch > 4096) {
-                System.err.println("batch muss zwischen 1 und 4096 liegen.");
-                return 2;
-            }
-
+        public Integer call() throws Exception {
             Path outPath;
             if (output != null) {
                 outPath = output;
-                ensureDir(outPath.getParent());
             } else {
+                ensureDir(outDir);
                 outPath = outDir.resolve(outFile);
-                ensureDir(outPath.getParent());
             }
+            ensureDir(outPath.getParent());
 
-            CtPoller poller = new CtPoller(outPath, certOnly, !noProgress, debug);
-            poller.run(logUrl, start, batch, sleepMs, maxEntries);
+            CtPoller poller = new CtPoller(
+                    logBase,
+                    start,
+                    batch,
+                    sleepMs,
+                    maxEntries,
+                    outPath,
+                    certOnly,
+                    noProgress,
+                    debug
+            );
+            poller.run();
             return 0;
         }
     }
 
-    // --- kleine Helfer --------------------------------------------------------------------
+    // --- Utility-Methoden -----------------------------------------------------------------
 
-    private static String promptFree(Scanner in, String label, String def) {
-        System.out.print(label + (def != null && !def.isBlank() ? " [" + def + "]" : "") + ": ");
-        String s = in.nextLine().trim();
-        return s.isBlank() ? def : s;
-    }
-
-    private static boolean readYesNo(Scanner in, String label, boolean def) {
-        String suffix = def ? " [Y/n]" : " [y/N]";
+    private static String readChoice(Scanner in, String label, Set<String> allowed, String defaultVal) {
         while (true) {
-            System.out.print(label + suffix + " ");
-            String line = in.nextLine().trim().toLowerCase();
-            if (line.isEmpty()) return def;
-            if (line.equals("y") || line.equals("yes") || line.equals("j") || line.equals("ja")) return true;
-            if (line.equals("n") || line.equals("no") || line.equals("nein")) return false;
-            System.out.println("Bitte 'y' oder 'n' eingeben.");
+            System.out.print(label + (defaultVal != null ? " [" + defaultVal + "]" : "") + ": ");
+            String s = in.nextLine().trim();
+            if (s.isEmpty() && defaultVal != null) return defaultVal;
+            if (allowed.contains(s)) return s;
+            System.out.println("Ungültige Eingabe. Erlaubt: " + allowed);
         }
     }
 
-    private static String readChoice(Scanner in, String label, Set<String> allowed, String def) {
+    private static boolean readYesNo(Scanner in, String label, boolean defaultYes) {
+        String def = defaultYes ? "Y/n" : "y/N";
         while (true) {
-            System.out.print(label + (def != null ? " [" + def + "]" : "") + ": ");
-            String line = in.nextLine().trim();
-            if (line.isEmpty() && def != null) return def;
-            if (allowed.contains(line)) return line;
-            System.out.println("Ungültige Eingabe. Erlaubt: " + allowed);
+            System.out.print(label + " (" + def + "): ");
+            String s = in.nextLine().trim().toLowerCase(Locale.ROOT);
+            if (s.isEmpty()) return defaultYes;
+            if (s.startsWith("y") || s.startsWith("j")) return true;
+            if (s.startsWith("n")) return false;
+            System.out.println("Bitte 'y' oder 'n' eingeben.");
         }
     }
 
@@ -541,15 +541,25 @@ public class Main implements Callable<Integer> {
         while (true) {
             System.out.print(label + " [" + def + "]: ");
             String s = in.nextLine().trim();
-            if (s.isBlank()) return def;
+            if (s.isEmpty()) return def;
             try {
                 long v = Long.parseLong(s);
-                if (v < min || v > max) throw new NumberFormatException();
+                if (v < min || v > max) {
+                    System.out.println("Wert außerhalb des erlaubten Bereichs (" + min + "-" + max + ").");
+                    continue;
+                }
                 return v;
             } catch (NumberFormatException e) {
-                System.out.println("Invalid value, try again");
+                System.out.println("Bitte eine Zahl eingeben.");
             }
         }
+    }
+
+    private static String promptFree(Scanner in, String label, String defaultVal) {
+        System.out.print(label + " [" + defaultVal + "]: ");
+        String s = in.nextLine();
+        if (s == null || s.isBlank()) return defaultVal;
+        return s.trim();
     }
 
     private static Path defaultJavaCacerts() {

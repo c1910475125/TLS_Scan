@@ -1,186 +1,145 @@
 package org.tlsscan;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.core.type.TypeReference;
 
 import java.io.*;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.KeyStore;
-import java.security.cert.*;
+import java.security.cert.X509Certificate;
 import java.util.*;
-import java.util.Base64;
-import java.util.Locale;
 
 public class StoreScorer {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public double scoreStore(String path, String type, String password,
-                             String countryScoresPath, String countryFrom, boolean includeNonCa) throws Exception {
+    public void scoreStore(Path storePath,
+                           char[] password,
+                           String countryScoresPath) throws Exception {
 
-        Map<String, Double> scoreByIso2 = loadCountryScoresWithFallback(countryScoresPath);
-        List<X509Certificate> certs = loadCertificates(path, type, password);
-
-        List<X509Certificate> considered = certs.stream()
-                .filter(c -> includeNonCa || isCaCert(c))
-                .toList();
-
-        if (considered.isEmpty()) {
-            System.out.println("Keine (passenden) Zertifikate im Store gefunden.");
-            return 0.0;
+        KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+        try (InputStream in = Files.newInputStream(storePath)) {
+            ks.load(in, password);
         }
 
-        Map<String, Integer> countByCountry = new HashMap<>();
-        for (X509Certificate c : considered) {
-            String dn = "issuer".equalsIgnoreCase(countryFrom)
-                    ? c.getIssuerX500Principal().getName()
-                    : c.getSubjectX500Principal().getName();
-            String country = extractCountry(dn);
-            if (country == null || country.isBlank()) country = "UNKNOWN";
-            country = country.toUpperCase(Locale.ROOT);
-            countByCountry.merge(country, 1, Integer::sum);
-        }
+        Map<String, Double> countryScores = loadCountryScoresWithFallback(countryScoresPath);
 
-        int total = considered.size();
-        System.out.println("=== Zusammenfassung ===");
-        System.out.println("Berücksichtigte Zertifikate: " + total + (includeNonCa ? " (inkl. Nicht-CA)" : " (nur CAs)"));
-        System.out.println("Landebasis: " + ("issuer".equalsIgnoreCase(countryFrom) ? "Issuer (Aussteller)" : "Subject (Inhaber)"));
-        System.out.println();
-        System.out.printf("%-6s %10s %12s %14s %14s%n",
-                "Land", "Anzahl", "Anteil(%)", "TrustScore", "Teilbetrag");
-
-        double weighted = 0.0;
-        List<Map.Entry<String,Integer>> rows = new ArrayList<>(countByCountry.entrySet());
-        rows.sort(Map.Entry.<String,Integer>comparingByValue().reversed());
-
-        for (Map.Entry<String,Integer> e : rows) {
-            String iso2 = e.getKey();
-            int cnt = e.getValue();
-            double frac = (double) cnt / (double) total;
-            Double ts = scoreByIso2.get(iso2);
-            double part = ts == null ? 0.0 : ts * frac;
-
-            System.out.printf(Locale.ROOT, "%-6s %10d %12.2f %14s %14.6f%n",
-                    iso2, cnt, 100.0 * frac, ts == null ? "n/a" : String.format(Locale.ROOT, "%.6f", ts), part);
-
-            if (ts != null) weighted += part;
-        }
-
-        return weighted;
-    }
-
-    private Map<String, Double> loadCountryScoresWithFallback(String path) throws IOException {
-        if (path != null && !path.isBlank()) {
-            Path p = Paths.get(path);
-            if (Files.exists(p)) {
-                try (InputStream in = Files.newInputStream(p)) {
-                    return normalizeScores(mapper.readValue(in, new TypeReference<>() {
-                    }));
-                }
-            }
-        }
-        try (InputStream in = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("country_trustscores.json")) {
-            if (in == null) {
-                throw new FileNotFoundException("country_trustscores.json nicht gefunden (Pfad und Classpath geprüft).");
-            }
-            return normalizeScores(mapper.readValue(in, new TypeReference<>() {
-            }));
-        }
-    }
-
-    private Map<String, Double> normalizeScores(Map<String, Double> m) {
-        Map<String, Double> norm = new HashMap<>();
-        for (var e : m.entrySet()) {
-            norm.put(e.getKey().trim().toUpperCase(Locale.ROOT), e.getValue());
-        }
-        return norm;
-    }
-
-    private List<X509Certificate> loadCertificates(String path, String type, String password) throws Exception {
-        return switch (type.toLowerCase(Locale.ROOT)) {
-            case "jks" -> loadFromKeyStore(path, "JKS", password);
-            case "pkcs12" -> loadFromKeyStore(path, "PKCS12", password);
-            case "pem-bundle" -> loadFromPemBundle(path);
-            case "pem-dir" -> loadFromPemDir(path);
-            default -> throw new IllegalArgumentException("Unbekannter Store-Typ: " + type);
-        };
-    }
-
-    private List<X509Certificate> loadFromKeyStore(String path, String ksType, String password) throws Exception {
-        KeyStore ks = KeyStore.getInstance(ksType);
-        try (InputStream in = Files.newInputStream(Paths.get(path))) {
-            ks.load(in, password != null ? password.toCharArray() : null);
-        }
-        List<X509Certificate> list = new ArrayList<>();
         Enumeration<String> aliases = ks.aliases();
+
+        Map<String, Long> countByCountry = new HashMap<>();
+        Map<String, Double> scoreByCountry = new HashMap<>();
+
+        long totalCerts = 0;
         while (aliases.hasMoreElements()) {
             String alias = aliases.nextElement();
-            Certificate cert = ks.getCertificate(alias);
-            if (cert instanceof X509Certificate x) {
-                list.add(x);
-            } else if (cert == null) {
-                Certificate[] chain = ks.getCertificateChain(alias);
-                if (chain != null) for (Certificate c : chain) if (c instanceof X509Certificate x2) list.add(x2);
+            if (!ks.isCertificateEntry(alias) && !ks.isKeyEntry(alias)) {
+                continue;
+            }
+
+            java.security.cert.Certificate c = ks.getCertificate(alias);
+            if (!(c instanceof X509Certificate)) {
+                continue;
+            }
+            totalCerts++;
+
+            X509Certificate cert = (X509Certificate) c;
+
+            String issuerCountry = extractCountryFromDn(cert.getIssuerX500Principal().getName());
+            String subjectCountry = extractCountryFromDn(cert.getSubjectX500Principal().getName());
+            String country = issuerCountry != null ? issuerCountry : subjectCountry;
+            if (country == null || country.isBlank()) {
+                country = "??";
+            }
+            country = country.toUpperCase(Locale.ROOT);
+
+            countByCountry.merge(country, 1L, Long::sum);
+
+            Double s = countryScores.get(country);
+            if (s != null) {
+                scoreByCountry.merge(country, s, Double::sum);
             }
         }
-        return list;
-    }
 
-    private List<X509Certificate> loadFromPemBundle(String path) throws Exception {
-        String pem = Files.readString(Paths.get(path));
-        return parsePemCertificates(pem);
-    }
+        System.out.println("Store: " + storePath);
+        System.out.println("Zertifikate im Store: " + totalCerts);
 
-    private List<X509Certificate> loadFromPemDir(String dir) throws Exception {
-        List<X509Certificate> out = new ArrayList<>();
-        try (var s = Files.walk(Paths.get(dir))) {
-            for (Path p : s.filter(Files::isRegularFile).toList()) {
-                String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
-                if (name.endsWith(".pem") || name.endsWith(".crt") || name.endsWith(".cer")) {
-                    String pem = Files.readString(p);
-                    out.addAll(parsePemCertificates(pem));
-                }
-            }
+        System.out.println("\nVerteilung nach Land (Issuer/Subject):");
+        List<Map.Entry<String, Long>> list = new ArrayList<>(countByCountry.entrySet());
+        list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+
+        for (Map.Entry<String, Long> e : list) {
+            String c = e.getKey();
+            long count = e.getValue();
+            Double sc = scoreByCountry.get(c);
+            String scoreStr = (sc != null) ? String.format(Locale.ROOT, "%.4f", sc) : "-";
+            System.out.printf(Locale.ROOT, "%-4s  %,10d  ScoreSum=%s%n", c, count, scoreStr);
         }
-        return out;
+
+        double totalScore = scoreByCountry.values().stream().mapToDouble(Double::doubleValue).sum();
+        System.out.println("\nGesamtscore (Summe aller Länderscores im Store): " +
+                String.format(Locale.ROOT, "%.4f", totalScore));
     }
 
-    private List<X509Certificate> parsePemCertificates(String pem) throws Exception {
-        List<X509Certificate> list = new ArrayList<>();
-        CertificateFactory cf = CertificateFactory.getInstance("X.509");
-        String[] blocks = pem.split("-----END CERTIFICATE-----");
-        for (String b : blocks) {
-            int start = b.indexOf("-----BEGIN CERTIFICATE-----");
-            if (start >= 0) {
-                String one = b.substring(start) + "-----END CERTIFICATE-----";
-                String cleaned = one.replaceAll("-----BEGIN CERTIFICATE-----", "")
-                        .replaceAll("-----END CERTIFICATE-----", "")
-                        .replaceAll("\\s", "");
-                byte[] der = Base64.getDecoder().decode(cleaned);
-                try (ByteArrayInputStream bin = new ByteArrayInputStream(der)) {
-                    list.add((X509Certificate) cf.generateCertificate(bin));
-                }
-            }
-        }
-        return list;
-    }
-
-    private boolean isCaCert(X509Certificate c) {
-        try {
-            if (c.getBasicConstraints() >= 0) return true; // CA
-            boolean[] ku = c.getKeyUsage();
-            if (ku != null && ku.length > 5 && ku[5]) return true; // keyCertSign
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    private String extractCountry(String dn) {
+    private String extractCountryFromDn(String dn) {
+        if (dn == null) return null;
         String[] parts = dn.split(",");
         for (String p : parts) {
             String[] kv = p.trim().split("=");
-            if (kv.length == 2 && kv[0].equalsIgnoreCase("C")) return kv[1].trim();
+            if (kv.length == 2 && kv[0].equalsIgnoreCase("C")) {
+                return kv[1].trim();
+            }
         }
         return null;
+    }
+
+    private Map<String, Double> loadCountryScoresWithFallback(String path) {
+        Map<String, Double> m = new HashMap<>();
+        try {
+            if (path != null && !path.isBlank()) {
+                Path p = Paths.get(path);
+                if (Files.exists(p)) {
+                    try (InputStream in = Files.newInputStream(p)) {
+                        m.putAll(normalizeScores(mapper.readValue(
+                                in,
+                                mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
+                        )));
+                        return m;
+                    }
+                }
+            }
+            try (InputStream in = Thread.currentThread().getContextClassLoader()
+                    .getResourceAsStream("country_trustscores.json")) {
+                if (in != null) {
+                    m.putAll(normalizeScores(mapper.readValue(
+                            in,
+                            mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
+                    )));
+                } else {
+                    System.err.println("[StoreScorer] country_trustscores.json nicht in Ressourcen gefunden.");
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[StoreScorer] Fehler beim Laden der Länderscores: " + e.getMessage());
+        }
+        return m;
+    }
+
+    private Map<String, Double> normalizeScores(Map<String, Double> raw) {
+        Map<String, Double> out = new HashMap<>();
+        double sum = 0.0;
+        for (Map.Entry<String, Double> e : raw.entrySet()) {
+            if (e.getKey() == null || e.getValue() == null) continue;
+            String k = e.getKey().trim().toUpperCase(Locale.ROOT);
+            double v = e.getValue();
+            if (v <= 0) continue;
+            out.put(k, v);
+            sum += v;
+        }
+        if (sum <= 0) return out;
+        for (Map.Entry<String, Double> e : out.entrySet()) {
+            out.put(e.getKey(), e.getValue() / sum);
+        }
+        return out;
     }
 }

@@ -15,18 +15,34 @@ import java.util.concurrent.Callable;
 )
 public class AnalyzeCommand implements Callable<Integer> {
 
-    @Option(names = {"-i", "--input"}, required = true,
-            description = "Input JSONL Datei (Dateiname relativ zu ./Scanfiles oder absoluter Pfad)")
+    @Option(names = {"-i", "--input"},
+            description = "Input-Datei (JSONL). Relativ zu ./Scanfiles oder absolut.",
+            required = true)
     Path input;
 
-    @Option(names = {"--trusted-by-country"},
-            description = "Berechnet zusätzlich TrustScores pro Ausstellerland (country_trustscores.json).")
-    boolean trustedByCountry = false;
+    @Option(names = {"--scores"},
+            description = "Pfad zu country_trustscores.json (optional, default aus Ressourcen).")
+    String scoresFile;
+
+    @Option(names = {"--debug"},
+            description = "Debug-Log aktivieren.")
+    boolean debug;
 
     @Override
-    public Integer call() {
-        Path effective = resolveInputPath(input);
-        new Analyzer().processJsonl(effective.toString(), trustedByCountry);
+    public Integer call() throws Exception {
+        Path inPath = resolveInputPath(input);
+        if (!Files.exists(inPath)) {
+            System.err.println("Input-Datei existiert nicht: " + inPath);
+            return 1;
+        }
+
+        Analyzer analyzer = new Analyzer();
+        analyzer.analyze(
+                inPath,
+                scoresFile,
+                debug
+        );
+
         return 0;
     }
 

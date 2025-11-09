@@ -15,48 +15,35 @@ import java.util.concurrent.Callable;
 )
 public class StoreScoreCommand implements Callable<Integer> {
 
-    @Option(names = {"--store"}, required = true,
-            description = "RootStore-Datei (Dateiname relativ zu ./RootStores oder absoluter Pfad).")
-    Path store;
+    @Option(names = {"-k", "--keystore"},
+            description = "Pfad zum Keystore (z.B. cacerts).",
+            required = true)
+    Path keystorePath;
 
-    @Option(names = {"--type"}, description = "Store-Typ (jks/pkcs12/pem-bundle/pem-dir). Default: jks.")
-    String type = "jks";
-
-    @Option(names = {"--password"}, description = "Store-Passwort (leer falls keins).")
+    @Option(names = {"-p", "--password"},
+            description = "Passwort für den Keystore (default: changeit).",
+            defaultValue = "changeit")
     String password;
 
-    @Option(names = {"--country-from"},
-            description = "Land aus 'issuer' oder 'subject' ableiten. Default: issuer.")
-    String countryFrom = "issuer";
-
-    @Option(names = {"--country-scores"},
-            description = "Pfad zu country_trustscores.json (sonst aus Ressourcen geladen).")
-    Path countryScores;
-
-    @Option(names = {"--include-non-ca"},
-            description = "Auch Nicht-CA-Zertifikate im RootStore mitbewerten.")
-    boolean includeNonCa = false;
+    @Option(names = {"--scores"},
+            description = "Pfad zu country_trustscores.json (optional, default aus Ressourcen).")
+    String scoresFile;
 
     @Override
-    public Integer call() {
-        Path storePath = resolveRootStorePath(store);
-        String scoresPath = (countryScores != null) ? countryScores.toString() : null;
-
-        try {
-            double score = new StoreScorer().scoreStore(
-                    storePath.toString(),
-                    type,
-                    (password == null || password.isBlank()) ? null : password,
-                    scoresPath,
-                    countryFrom,
-                    includeNonCa
-            );
-            System.out.printf("Gesamter gewichteter RootStore-TrustScore: %.6f%n", score);
-            return 0;
-        } catch (Exception e) {
-            System.err.println("Fehler bei RootStore-Bewertung: " + e.getMessage());
+    public Integer call() throws Exception {
+        Path storePath = resolveRootStorePath(keystorePath);
+        if (!Files.exists(storePath)) {
+            System.err.println("Keystore existiert nicht: " + storePath);
             return 1;
         }
+
+        StoreScorer scorer = new StoreScorer();
+        scorer.scoreStore(
+                storePath,
+                password.toCharArray(),
+                scoresFile
+        );
+        return 0;
     }
 
     private Path resolveRootStorePath(Path p) {

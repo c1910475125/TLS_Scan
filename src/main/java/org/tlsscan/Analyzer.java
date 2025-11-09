@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -15,46 +16,44 @@ import java.util.Locale;
 public class Analyzer {
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public void processJsonl(String inputFile, boolean withTrustScores) {
-        Map<String, Integer> byCountry = new HashMap<>();
-        int total = 0;
-        int parsed = 0;
+    public void analyze(Path input,
+                        String countryScoresPath,
+                        boolean debug) throws IOException {
 
-        Map<String, Double> trustScores = Collections.emptyMap();
-        double sumTrustScores = 0.0;
-        int scoredCerts = 0;
+        Map<String, Double> countryScores = loadCountryScoresWithFallback(countryScoresPath);
 
-        if (withTrustScores) {
-            trustScores = loadCountryScoresWithFallback(null);
-        }
+        long lines = 0;
+        long certs = 0;
+        long parsed = 0;
 
-        try (BufferedReader br = new BufferedReader(new FileReader(inputFile))) {
+        Map<String, Long> countByCountry = new HashMap<>();
+        Map<String, Double> scoreByCountry = new HashMap<>();
+
+        try (BufferedReader br = Files.newBufferedReader(input)) {
             String line;
             while ((line = br.readLine()) != null) {
+                lines++;
                 if (line.isBlank()) continue;
-                total++;
 
-                JsonNode node = mapper.readTree(line);
-                JsonNode data = node.path("data");
-                String pem = null;
-
-                // CT-ähnliche Struktur (CertStream, CtPoll, ActiveScanner)
-                JsonNode leaf = data.path("leaf_cert");
-                if (!leaf.isMissingNode()) {
-                    if (leaf.has("pem")) {
-                        pem = leaf.get("pem").asText(null);
-                    } else if (leaf.has("as_pem")) {
-                        pem = leaf.get("as_pem").asText(null);
-                    } else if (leaf.has("certificate")) {
-                        pem = leaf.get("certificate").asText(null);
+                JsonNode root;
+                try {
+                    root = mapper.readTree(line);
+                } catch (Exception e) {
+                    if (debug) {
+                        System.err.println("[Analyze] JSON-Parse-Fehler in Zeile " + lines + ": " + e.getMessage());
                     }
+                    continue;
                 }
 
-                if (pem == null) {
-                    // Fallback: falls das PEM direkt im Datenknoten liegt
-                    if (data.has("pem")) pem = data.get("pem").asText(null);
-                }
+                JsonNode data = root.path("data");
+                if (data.isMissingNode() || data.isNull()) continue;
 
+                JsonNode leaf = data.path("leaf_cert").path("pem");
+                if (!leaf.isTextual()) {
+                    continue;
+                }
+                certs++;
+                String pem = leaf.asText();
                 if (pem == null) {
                     continue;
                 }
@@ -69,52 +68,48 @@ public class Analyzer {
                 String issuerCountry = extractCountryFromDn(cert.getIssuerX500Principal().getName());
                 String subjectCountry = extractCountryFromDn(cert.getSubjectX500Principal().getName());
 
-                String country = issuerCountry != null ? issuerCountry
-                        : subjectCountry != null ? subjectCountry
-                        : "UNKNOWN";
+                String country = issuerCountry != null ? issuerCountry : subjectCountry;
+                if (country == null || country.isBlank()) {
+                    country = "??";
+                }
 
-                String iso = country == null ? "UNKNOWN" : country.trim().toUpperCase(Locale.ROOT);
-                byCountry.merge(iso, 1, Integer::sum);
+                country = country.toUpperCase(Locale.ROOT);
 
-                if (withTrustScores) {
-                    Double ts = trustScores.get(iso);
-                    if (ts != null) {
-                        sumTrustScores += ts;
-                        scoredCerts++;
-                    }
+                countByCountry.merge(country, 1L, Long::sum);
+
+                Double s = countryScores.get(country);
+                if (s != null) {
+                    scoreByCountry.merge(country, s, Double::sum);
                 }
             }
-
-            System.out.printf("Total events: %d; parsed certs: %d%n", total, parsed);
-            System.out.println("Certificates per country (Issuer/Subject C=):");
-            byCountry.entrySet().stream()
-                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-                    .forEach(e ->
-                            System.out.printf("  %s: %d%n", e.getKey(), e.getValue())
-                    );
-
-            if (withTrustScores) {
-                System.out.println("\n--- TrustScore-Auswertung (nach Ausstellerland, country_trustscores.json) ---");
-                if (scoredCerts > 0) {
-                    double avg = sumTrustScores / scoredCerts;
-                    System.out.println("Bewertete Zertifikate (mit bekanntem Länderscore): " + scoredCerts);
-                    System.out.printf(Locale.ROOT,
-                            "Durchschnittlicher TrustScore des Ausstellerlandes: %.6f%n", avg);
-                } else {
-                    System.out.println("Keine Zertifikate mit bekanntem Länderscore gefunden.");
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("Read error: " + e.getMessage());
         }
+
+        System.out.println("Zeilen gelesen     : " + lines);
+        System.out.println("Zertifikate gefunden : " + certs);
+        System.out.println("Zertifikate geparst  : " + parsed);
+
+        System.out.println("\nVerteilung nach Land (Zertifikatsaussteller / Subject-Country):");
+        List<Map.Entry<String, Long>> list = new ArrayList<>(countByCountry.entrySet());
+        list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+
+        for (Map.Entry<String, Long> e : list) {
+            String c = e.getKey();
+            long count = e.getValue();
+            Double sc = scoreByCountry.get(c);
+            String scoreStr = (sc != null) ? String.format(Locale.ROOT, "%.4f", sc) : "-";
+            System.out.printf(Locale.ROOT, "%-4s  %,10d  ScoreSum=%s%n", c, count, scoreStr);
+        }
+
+        double totalScore = scoreByCountry.values().stream().mapToDouble(Double::doubleValue).sum();
+        System.out.println("\nGesamtscore (Summe aller Länderscores): " + String.format(Locale.ROOT, "%.4f", totalScore));
     }
 
     private X509Certificate pemToX509(String pem) {
         try {
-            String cleaned = pem.replaceAll("-----BEGIN CERTIFICATE-----", "")
-                    .replaceAll("-----END CERTIFICATE-----", "")
-                    .replaceAll("\\s", "");
-            byte[] der = Base64.getDecoder().decode(cleaned);
+            String normalized = pem.replace("-----BEGIN CERTIFICATE-----", "")
+                    .replace("-----END CERTIFICATE-----", "")
+                    .replaceAll("\\s+", "");
+            byte[] der = Base64.getDecoder().decode(normalized);
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             return (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der));
         } catch (Exception e) {
@@ -157,20 +152,30 @@ public class Analyzer {
                             mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
                     )));
                 } else {
-                    System.err.println("country_trustscores.json nicht auf dem Classpath gefunden – TrustScores deaktiviert.");
+                    System.err.println("[Analyzer] country_trustscores.json nicht in Ressourcen gefunden.");
                 }
             }
         } catch (Exception e) {
-            System.err.println("Konnte country_trustscores.json nicht laden: " + e.getMessage());
+            System.err.println("[Analyzer] Fehler beim Laden der Länderscores: " + e.getMessage());
         }
         return m;
     }
 
-    private Map<String, Double> normalizeScores(Map<String, Double> src) {
-        Map<String, Double> norm = new HashMap<>();
-        for (Map.Entry<String, Double> e : src.entrySet()) {
-            norm.put(e.getKey().trim().toUpperCase(Locale.ROOT), e.getValue());
+    private Map<String, Double> normalizeScores(Map<String, Double> raw) {
+        Map<String, Double> out = new HashMap<>();
+        double sum = 0.0;
+        for (Map.Entry<String, Double> e : raw.entrySet()) {
+            if (e.getKey() == null || e.getValue() == null) continue;
+            String k = e.getKey().trim().toUpperCase(Locale.ROOT);
+            double v = e.getValue();
+            if (v <= 0) continue;
+            out.put(k, v);
+            sum += v;
         }
-        return norm;
+        if (sum <= 0) return out;
+        for (Map.Entry<String, Double> e : out.entrySet()) {
+            out.put(e.getKey(), e.getValue() / sum);
+        }
+        return out;
     }
 }

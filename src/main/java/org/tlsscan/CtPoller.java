@@ -12,41 +12,62 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class CtPoller {
 
+    private final String logBaseUrl;
+    private final long startIndex;
+    private final int batchSize;
+    private final int sleepMs;
+    private final long maxEntries;
     private final Path outputPath;
     private final boolean certOnly;
-    private final boolean progress;
+    private final boolean noProgress;
     private final boolean debug;
+
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public CtPoller(Path outputPath, boolean certOnly, boolean progress, boolean debug) {
+    public CtPoller(String logBaseUrl,
+                    long startIndex,
+                    int batchSize,
+                    int sleepMs,
+                    long maxEntries,
+                    Path outputPath,
+                    boolean certOnly,
+                    boolean noProgress,
+                    boolean debug) {
+        this.logBaseUrl = logBaseUrl;
+        this.startIndex = startIndex;
+        this.batchSize = batchSize;
+        this.sleepMs = sleepMs;
+        this.maxEntries = maxEntries;
         this.outputPath = outputPath;
         this.certOnly = certOnly;
-        this.progress = progress;
+        this.noProgress = noProgress;
         this.debug = debug;
     }
 
-    public void run(String logBaseUrl, long startIndex, int batchSize, int sleepMs, long maxEntries) {
+    public void run() throws Exception {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .build();
 
-        AtomicLong written = new AtomicLong(0);
-        long idx = startIndex;
-        long remaining = maxEntries > 0 ? maxEntries : Long.MAX_VALUE;
+        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(outputPath.toFile(), true),
+                StandardCharsets.UTF_8))) {
 
-        System.out.println("CT-Poll gestartet: " + logBaseUrl + "  -> " + outputPath);
+            long idx = startIndex;
+            long written = 0;
 
-        try (BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputPath.toFile(), true), StandardCharsets.UTF_8))) {
-            Instant t0 = Instant.now();
-            while (remaining > 0) {
+            while (true) {
+                long remaining = (maxEntries > 0) ? (maxEntries - written) : Long.MAX_VALUE;
+                if (remaining <= 0) break;
+
                 int take = (int) Math.min(batchSize, remaining);
                 long end = idx + take - 1;
                 String url = normalize(logBaseUrl) + "/ct/v1/get-entries?start=" + idx + "&end=" + end;
@@ -62,122 +83,102 @@ public class CtPoller {
                 }
 
                 JsonNode root = mapper.readTree(resp.body());
-                JsonNode entries = root.get("entries");
-                if (entries == null || !entries.isArray() || entries.isEmpty()) {
-                    if (debug) System.out.println("Keine Einträge (leer). Warte …");
-                    TimeUnit.MILLISECONDS.sleep(Math.max(1000, sleepMs));
-                    continue;
+                JsonNode entries = root.path("entries");
+                if (!entries.isArray() || entries.size() == 0) {
+                    System.out.println("Keine weiteren Einträge. Stoppe.");
+                    break;
                 }
 
-                int processed = 0;
-                for (JsonNode e : entries) {
-                    String leafInputB64 = e.path("leaf_input").asText(null);
-                    String extraDataB64 = e.path("extra_data").asText(null);
-
-                    String pem = null;
-                    try {
-                        if (leafInputB64 != null) {
-                            byte[] leaf = Base64.getDecoder().decode(leafInputB64);
-                            pem = pemFromLeafOrNull(leaf);
-                        }
-                        if (pem == null && extraDataB64 != null) {
-                            byte[] extra = Base64.getDecoder().decode(extraDataB64);
-                            pem = pemFromExtraOrNull(extra);
-                        }
-                    } catch (Exception ex) {
-                        if (debug) System.out.println("Decode-Fehler: " + ex.getMessage());
+                for (JsonNode entry : entries) {
+                    ObjectNode out = convertEntry(entry);
+                    if (out == null) continue;
+                    String json = mapper.writeValueAsString(out);
+                    writer.write(json);
+                    writer.write("\n");
+                    written++;
+                    if (!noProgress && written % 100 == 0) {
+                        System.out.printf("[CT-Poll] Geschrieben: %,d (Index ab %d)%n",
+                                written, startIndex);
                     }
-
-                    ObjectNode data = mapper.createObjectNode();
-                    ObjectNode leafCert = mapper.createObjectNode();
-                    if (pem != null) leafCert.put("pem", pem);
-                    data.set("leaf_cert", leafCert);
-                    ObjectNode line = mapper.createObjectNode();
-                    line.put("message_type", "certificate_update");
-                    line.set("data", data);
-
-                    String out = certOnly ? mapper.createObjectNode()
-                            .put("message_type", "certificate_update")
-                            .set("data", data).toString()
-                            : line.toString();
-
-                    bw.write(out);
-                    bw.write("\n");
-                    processed++;
+                    if (maxEntries > 0 && written >= maxEntries) {
+                        break;
+                    }
                 }
 
-                bw.flush();
+                idx = end + 1;
 
-                written.addAndGet(processed);
-                idx += processed;
-                remaining -= processed;
-
-                if (progress) {
-                    double secs = Math.max(1, Duration.between(t0, Instant.now()).toSeconds());
-                    double rate = written.get() / secs;
-                    System.out.printf("\r[HTTP] Entries: %,d  (%.2f/s)  File: %s", written.get(), rate, outputPath);
+                if (maxEntries > 0 && written >= maxEntries) {
+                    System.out.println("Maximale Anzahl Einträge erreicht.");
+                    break;
                 }
 
-                if (sleepMs > 0) TimeUnit.MILLISECONDS.sleep(sleepMs);
+                TimeUnit.MILLISECONDS.sleep(sleepMs);
             }
-        } catch (Exception ex) {
-            System.err.println("ct-poll Fehler: " + ex.getMessage());
+
+            System.out.println("CT-Poll fertig. Geschriebene Einträge: " + written +
+                    " -> " + outputPath);
         }
-
-        if (progress) System.out.println("\nCT-Poll beendet. Geschriebene Einträge: " + written.get());
     }
 
-    // --- Decoder-Helfer ---
-    private String pemFromLeafOrNull(byte[] leaf) {
-        if (leaf.length < 12) return null;
-        int entryType = ((leaf[10] & 0xff) << 8) | (leaf[11] & 0xff);
-        int pos = 12;
-        if (entryType == 0) {
-            if (leaf.length < pos + 3) return null;
-            int certLen = uint24(leaf, pos); pos += 3;
-            if (leaf.length < pos + certLen) return null;
-            byte[] der = new byte[certLen];
-            System.arraycopy(leaf, pos, der, 0, certLen);
-            return derToPemIfValid(der);
+    private String normalize(String base) {
+        if (base.endsWith("/")) {
+            return base.substring(0, base.length() - 1);
         }
-        return null;
-    }
-
-    private String pemFromExtraOrNull(byte[] extra) {
-        try {
-            if (extra.length >= 3) {
-                int len = uint24(extra, 0);
-                if (extra.length >= 3 + len) {
-                    byte[] der = new byte[len];
-                    System.arraycopy(extra, 3, der, 0, len);
-                    return derToPemIfValid(der);
-                }
-            }
-        } catch (Exception ignore) {}
-        return null;
-    }
-
-    private static int uint24(byte[] a, int off) {
-        return ((a[off] & 0xff) << 16) | ((a[off+1] & 0xff) << 8) | (a[off+2] & 0xff);
-    }
-
-    private String derToPemIfValid(byte[] der) {
-        try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            cf.generateCertificate(new ByteArrayInputStream(der));
-            String b64 = java.util.Base64.getEncoder().encodeToString(der);
-            StringBuilder sb = new StringBuilder();
-            sb.append("-----BEGIN CERTIFICATE-----\n");
-            for (int i=0;i<b64.length();i+=64) {
-                sb.append(b64, i, Math.min(i+64, b64.length())).append("\n");
-            }
-            sb.append("-----END CERTIFICATE-----\n");
-            return sb.toString();
-        } catch (Exception e) { return null; }
-    }
-
-    private static String normalize(String base) {
-        if (base.endsWith("/")) return base.substring(0, base.length()-1);
         return base;
+    }
+
+    private ObjectNode convertEntry(JsonNode entry) {
+        try {
+            String leafB64 = entry.path("leaf_input").asText(null);
+            if (leafB64 == null) return null;
+
+            byte[] leafBytes = Base64.getDecoder().decode(leafB64);
+            if (leafBytes.length < 4) return null;
+
+            int len = ((leafBytes[0] & 0xff) << 8) | (leafBytes[1] & 0xff);
+            if (leafBytes.length < 4 + len) return null;
+
+            byte[] certDer = new byte[len];
+            System.arraycopy(leafBytes, 4, certDer, 0, len);
+
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certDer));
+
+            String pem = derToPem(certDer);
+
+            ObjectNode data = mapper.createObjectNode();
+            ObjectNode leaf = mapper.createObjectNode();
+            leaf.put("pem", pem);
+            data.set("leaf_cert", leaf);
+
+            if (!certOnly) {
+                data.put("subject", cert.getSubjectX500Principal().getName());
+                data.put("issuer", cert.getIssuerX500Principal().getName());
+                data.put("not_before", cert.getNotBefore().toInstant().toString());
+                data.put("not_after", cert.getNotAfter().toInstant().toString());
+            }
+
+            ObjectNode root = mapper.createObjectNode();
+            root.put("message_type", "ct_poll");
+            root.set("data", data);
+            return root;
+        } catch (Exception e) {
+            if (debug) {
+                System.err.println("[CT-Poll] Fehler beim Konvertieren eines Eintrags: " + e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    private String derToPem(byte[] der) {
+        String b64 = Base64.getEncoder().encodeToString(der);
+        StringBuilder sb = new StringBuilder();
+        sb.append("-----BEGIN CERTIFICATE-----\n");
+        for (int i = 0; i < b64.length(); i += 64) {
+            int end = Math.min(i + 64, b64.length());
+            sb.append(b64, i, end).append("\n");
+        }
+        sb.append("-----END CERTIFICATE-----\n");
+        return sb.toString();
     }
 }
