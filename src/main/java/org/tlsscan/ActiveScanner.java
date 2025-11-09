@@ -1,5 +1,6 @@
 package org.tlsscan;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,10 +15,14 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
+import javax.naming.ldap.LdapName;
+import javax.naming.ldap.Rdn;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.InputStreamReader;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.net.InetAddress;
@@ -29,6 +34,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
@@ -37,11 +43,20 @@ import java.util.Base64;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Aktiver TLS-Scanner.
+ * - Kann interne Java-TLS-Engine oder extern zgrab2 verwenden.
+ * - Nutzt GeoLite2 (Country/City/ASN) für Filter & Länderscans.
+ * - Liefert Zertifikats-Metadaten inkl. issuer_country / subject_country.
+ */
 public class ActiveScanner {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final Random random = new Random();
 
+    /**
+     * Erweiterte Scan-Optionen.
+     */
     public static class AdvancedScanOptions {
         public String geoipCountryDbPath;
         public String geoipAsnDbPath;
@@ -54,23 +69,26 @@ public class ActiveScanner {
         public Integer randomSampleCount = 0;
         public String sampleFromCidr;
 
-        // Flag: soll überhaupt ein Ländervollscan gemacht werden?
         public boolean enableCountryFullScan = false;
-
-        // Liste von Ländern für Vollscan (optional; sonst fallback auf countryIsoCodes / alle)
         public List<String> fullScanCountries = new ArrayList<>();
-        public String countryBlocksCsvPath;     // GeoLite2-Country-Blocks-IPv4.csv
-        public String countryLocationsCsvPath;  // GeoLite2-Country-Locations-en.csv
+        public String countryBlocksCsvPath;
+        public String countryLocationsCsvPath;
 
-        // Zusätzliche CSVs
-        public String asnBlocksCsvPath;         // GeoLite2-ASN-Blocks-IPv4.csv
-        public String cityBlocksCsvPath;        // GeoLite2-City-Blocks-IPv4.csv
-        public String cityLocationsCsvPath;     // GeoLite2-City-Locations-en.csv
+        public String asnBlocksCsvPath;
+        public String cityBlocksCsvPath;
+        public String cityLocationsCsvPath;
+
+        // zgrab2-Integration
+        public boolean useZgrabOnly = false;
+        public String zgrabBinary = "zgrab2";
     }
 
     public ActiveScanner() {
     }
 
+    /**
+     * Haupteinstieg: baut Ziel-Liste (Targets + Geo-Pools) und startet Scan.
+     */
     public void scan(List<String> rawTargets,
                      List<Integer> ports,
                      Path outputJsonl,
@@ -93,7 +111,7 @@ public class ActiveScanner {
             adv = (AdvancedScanOptions) extra;
         }
 
-        // 1) Ziele aus direkten Angaben / CIDR-Ranges bauen
+        // 1) Direkt übergebene Ziele / CIDR
         List<HostPort> initialTargets = new ArrayList<>();
         for (String t : rawTargets) {
             if (t == null || t.isBlank()) continue;
@@ -120,7 +138,6 @@ public class ActiveScanner {
             }
         }
 
-        // 2) Geo-Scanner initialisieren (für Zufallsziele / Länderscan)
         InternalScanner scanner = new InternalScanner(
                 outputJsonl,
                 debug,
@@ -133,17 +150,17 @@ public class ActiveScanner {
         try {
             List<HostPort> allTargets = new ArrayList<>(initialTargets);
 
-            // Zufallsstichprobe (aus GeoLite-Pool)
+            // 2) Zufallsstichprobe aus GeoLite-CSV-Pool (KEIN Fallback mehr auf "random IP + MMDB")
             if (adv != null && adv.randomSampleCount != null && adv.randomSampleCount > 0) {
                 List<HostPort> sampled = scanner.buildRandomSampleTargets(ports);
-                System.out.println("[ActiveScan] Zufallsziele (GeoLite2) erzeugt: " + sampled.size());
+                System.out.println("[ActiveScan] Zufallsziele (GeoLite2-CSV) erzeugt: " + sampled.size());
                 allTargets.addAll(sampled);
             }
 
-            // Vollständiger Länderscan (ein Host pro Netzblock aus Country-Blocks-CSV)
+            // 3) Vollständiger Länderscan (ein Host pro Netzblock)
             if (adv != null && adv.enableCountryFullScan) {
                 List<HostPort> countryTargets = scanner.buildCountryFullTargets(ports);
-                System.out.println("[ActiveScan] Länderscan-Ziele (GeoLite2) erzeugt: " + countryTargets.size());
+                System.out.println("[ActiveScan] Länderscan-Ziele (GeoLite2-CSV) erzeugt: " + countryTargets.size());
                 allTargets.addAll(countryTargets);
             }
 
@@ -155,13 +172,23 @@ public class ActiveScanner {
                 return;
             }
 
-            scanner.scanHostPortList(allTargets);
+            // 4) Scan ausführen
+            if (adv != null && adv.useZgrabOnly) {
+                System.out.println("[ActiveScan] Verwende externen TLS-Scanner (zgrab2).");
+                scanner.scanWithZgrab(allTargets);
+            } else {
+                System.out.println("[ActiveScan] Verwende interne Java-TLS-Engine.");
+                scanner.scanHostPortList(allTargets);
+            }
 
         } finally {
             scanner.close();
         }
     }
 
+    /**
+     * Host + Port als Target.
+     */
     private static class HostPort {
         final String host;
         final int port;
@@ -185,8 +212,9 @@ public class ActiveScanner {
         }
     }
 
-    // --- Hilfen im äußeren Scanner --------------------------------------------------------
-
+    /**
+     * Einfache IPv4-CIDR-Erweiterung (begrenzte Hostanzahl).
+     */
     private List<HostPort> expandCidrTargets(String cidr, List<Integer> ports, boolean debug) {
         List<HostPort> out = new ArrayList<>();
         try {
@@ -208,34 +236,22 @@ public class ActiveScanner {
             long totalHosts = (hostBits == 32) ? (1L << 32) : (1L << hostBits);
             long maxHosts = 65536L;
 
-            if (totalHosts <= maxHosts) {
-                for (long i = 0; i < totalHosts; i++) {
-                    long ip = base + i;
-                    String ipStr = toIp(ip);
-                    if (!looksGlobalUnicast(ipStr)) continue;
-                    for (int p : ports) {
-                        out.add(new HostPort(ipStr, p));
-                    }
+            if (totalHosts > maxHosts) {
+                if (debug) {
+                    System.out.printf(Locale.ROOT,
+                            "[CIDR] %s umfasst %,d Hosts – begrenze auf %,d%n",
+                            cidr, totalHosts, maxHosts);
                 }
-            } else {
-                HashSet<Long> offsets = new HashSet<>();
-                long targetCount = maxHosts;
-                while (offsets.size() < targetCount) {
-                    long off = (long) (random.nextDouble() * totalHosts);
-                    offsets.add(off);
-                }
-                for (Long off : offsets) {
-                    long ip = base + off;
-                    String ipStr = toIp(ip);
-                    if (!looksGlobalUnicast(ipStr)) continue;
-                    for (int p : ports) {
-                        out.add(new HostPort(ipStr, p));
-                    }
-                }
+                totalHosts = maxHosts;
             }
-            if (debug) {
-                System.out.printf(Locale.ROOT,
-                        "[CIDR] %s -> %,d Ziele%n", cidr, out.size());
+
+            for (long i = 0; i < totalHosts; i++) {
+                long ip = base + i;
+                String ipStr = toIp(ip);
+                if (!looksGlobalUnicast(ipStr)) continue;
+                for (int p : ports) {
+                    out.add(new HostPort(ipStr, p));
+                }
             }
         } catch (Exception e) {
             if (debug) {
@@ -259,16 +275,10 @@ public class ActiveScanner {
         try {
             int b1 = Integer.parseInt(parts[0]);
             int b2 = Integer.parseInt(parts[1]);
-
-            if (b1 == 0) return false;
             if (b1 == 10) return false;
-            if (b1 == 100 && (b2 >= 64 && b2 <= 127)) return false;
-            if (b1 == 127) return false;
-            if (b1 == 169 && b2 == 254) return false;
-            if (b1 == 172 && (b2 >= 16 && b2 <= 31)) return false;
-            if (b1 == 192 && b2 == 0) return false;
+            if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
             if (b1 == 192 && b2 == 168) return false;
-            if (b1 == 198 && (b2 == 18 || b2 == 19)) return false;
+            if (b1 == 127) return false;
             if (b1 >= 224) return false;
             return true;
         } catch (NumberFormatException e) {
@@ -276,29 +286,18 @@ public class ActiveScanner {
         }
     }
 
-    private static boolean isIpv4Literal(String host) {
-        String[] parts = host.split("\\.");
-        if (parts.length != 4) return false;
-        try {
-            for (String p : parts) {
-                int b = Integer.parseInt(p);
-                if (b < 0 || b > 255) return false;
-            }
-            return true;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
-
-    // --- innerer Scanner -------------------------------------------------------------------
-
-    private class InternalScanner {
+    /**
+     * Interner Scanner: hält GeoLite-DBs, Filter und implementiert
+     * sowohl Java-TLS-Scan als auch zgrab-Aufrufe.
+     */
+    class InternalScanner {
 
         private final Path outputPath;
         private final boolean debug;
         private final int connectTimeoutMs;
         private final int readTimeoutMs;
         private final int maxConcurrency;
+        private final AdvancedScanOptions adv;
 
         private final DatabaseReader countryDb;
         private final DatabaseReader asnDb;
@@ -333,18 +332,19 @@ public class ActiveScanner {
             this.connectTimeoutMs = connectTimeoutMs;
             this.readTimeoutMs = readTimeoutMs;
             this.maxConcurrency = Math.max(1, maxConcurrency);
+            this.adv = adv;
 
-            if (adv != null && adv.geoipCountryDbPath != null && !adv.geoipCountryDbPath.isBlank()) {
+            if (adv != null && adv.geoipCountryDbPath != null) {
                 this.countryDb = buildDbSafely(new File(adv.geoipCountryDbPath), "[GeoIP-Country]");
             } else {
                 this.countryDb = null;
             }
-            if (adv != null && adv.geoipAsnDbPath != null && !adv.geoipAsnDbPath.isBlank()) {
+            if (adv != null && adv.geoipAsnDbPath != null) {
                 this.asnDb = buildDbSafely(new File(adv.geoipAsnDbPath), "[GeoIP-ASN]");
             } else {
                 this.asnDb = null;
             }
-            if (adv != null && adv.geoipCityDbPath != null && !adv.geoipCityDbPath.isBlank()) {
+            if (adv != null && adv.geoipCityDbPath != null) {
                 this.cityDb = buildDbSafely(new File(adv.geoipCityDbPath), "[GeoIP-City]");
             } else {
                 this.cityDb = null;
@@ -387,14 +387,10 @@ public class ActiveScanner {
                 allowedAsns.clear();
             }
 
-            this.randomSampleCount = (adv != null && adv.randomSampleCount != null)
-                    ? adv.randomSampleCount
-                    : 0;
-            this.sampleFromCidr = (adv != null && adv.sampleFromCidr != null && !adv.sampleFromCidr.isBlank())
-                    ? adv.sampleFromCidr.trim()
-                    : null;
+            this.randomSampleCount = (adv != null && adv.randomSampleCount != null) ? adv.randomSampleCount : 0;
+            this.sampleFromCidr = adv != null ? adv.sampleFromCidr : null;
 
-            if (adv != null && adv.fullScanCountries != null) {
+            if (adv != null && adv.fullScanCountries != null && !adv.fullScanCountries.isEmpty()) {
                 List<String> tmp = new ArrayList<>();
                 for (String c : adv.fullScanCountries) {
                     if (c != null && !c.isBlank()) {
@@ -402,17 +398,15 @@ public class ActiveScanner {
                     }
                 }
                 this.fullScanCountries = tmp;
-                this.countryBlocksCsvPath = adv.countryBlocksCsvPath;
-                this.countryLocationsCsvPath = adv.countryLocationsCsvPath;
             } else {
-                this.fullScanCountries = Collections.emptyList();
-                this.countryBlocksCsvPath = adv != null ? adv.countryBlocksCsvPath : null;
-                this.countryLocationsCsvPath = adv != null ? adv.countryLocationsCsvPath : null;
+                this.fullScanCountries = new ArrayList<>();
             }
 
-            this.asnBlocksCsvPath = adv != null ? adv.asnBlocksCsvPath : null;
-            this.cityBlocksCsvPath = adv != null ? adv.cityBlocksCsvPath : null;
-            this.cityLocationsCsvPath = adv != null ? adv.cityLocationsCsvPath : null;
+            this.countryBlocksCsvPath = (adv != null) ? adv.countryBlocksCsvPath : null;
+            this.countryLocationsCsvPath = (adv != null) ? adv.countryLocationsCsvPath : null;
+            this.asnBlocksCsvPath = (adv != null) ? adv.asnBlocksCsvPath : null;
+            this.cityBlocksCsvPath = (adv != null) ? adv.cityBlocksCsvPath : null;
+            this.cityLocationsCsvPath = (adv != null) ? adv.cityLocationsCsvPath : null;
 
             this.randomIpPoolFromCsv = buildRandomIpPoolFromCsv();
         }
@@ -439,10 +433,12 @@ public class ActiveScanner {
             try { if (cityDb != null) cityDb.close(); } catch (IOException ignore) {}
         }
 
+        // ---------- GeoLite: IP-Pools aus CSV --------------------------------------------------
+
         private List<String> buildRandomIpPoolFromCsv() {
             LinkedHashSet<String> pool = new LinkedHashSet<>();
 
-            // 1) Country-CSV (Blocks + Locations)
+            // Country-CSV (Blocks + Locations)
             if (countryBlocksCsvPath != null && countryLocationsCsvPath != null) {
                 Path locPath = Path.of(countryLocationsCsvPath);
                 Path blocksPath = Path.of(countryBlocksCsvPath);
@@ -470,7 +466,7 @@ public class ActiveScanner {
                         }
                     } catch (IOException e) {
                         if (debug) {
-                            System.err.println("[RandomPool] Fehler beim Lesen Country-Locations-CSV: " + e.getMessage());
+                            System.err.println("[RandomPool] Country-Locations-CSV: " + e.getMessage());
                         }
                     }
 
@@ -500,13 +496,17 @@ public class ActiveScanner {
                                     } else if (idxGeo >= 0 && idxGeo < f.length && !f[idxGeo].trim().isEmpty()) {
                                         geoId = f[idxGeo].trim();
                                     }
-                                    if (geoId == null) continue;
 
-                                    String iso = geoIdToIso.get(geoId);
-                                    if (iso == null) continue;
-                                    iso = iso.toUpperCase(Locale.ROOT);
+                                    String iso = null;
+                                    if (geoId != null && !geoIdToIso.isEmpty()) {
+                                        iso = geoIdToIso.get(geoId);
+                                        if (iso != null) iso = iso.toUpperCase(Locale.ROOT);
+                                    }
 
-                                    if (allowed != null && !allowed.contains(iso)) {
+                                    if (allowed != null && iso != null && !allowed.contains(iso)) {
+                                        continue;
+                                    }
+                                    if (allowed != null && iso == null) {
                                         continue;
                                     }
 
@@ -515,23 +515,21 @@ public class ActiveScanner {
                                     if (slashIdx > 0) {
                                         baseIp = network.substring(0, slashIdx);
                                     }
+                                    if (!looksGlobalUnicast(baseIp)) continue;
 
-                                    if (!looksGlobalUnicast(baseIp)) {
-                                        continue;
-                                    }
                                     pool.add(baseIp);
                                 }
                             }
                         }
                     } catch (IOException e) {
                         if (debug) {
-                            System.err.println("[RandomPool] Fehler beim Lesen Country-Blocks-CSV: " + e.getMessage());
+                            System.err.println("[RandomPool] Country-Blocks-CSV: " + e.getMessage());
                         }
                     }
                 }
             }
 
-            // 2) ASN-CSV (Blocks-IPv4) – nur falls ASN-Filter gesetzt
+            // ASN-CSV: nur falls ASN-Filter aktiv
             if (asnBlocksCsvPath != null && !allowedAsns.isEmpty()) {
                 Path asnPath = Path.of(asnBlocksCsvPath);
                 if (Files.exists(asnPath)) {
@@ -566,17 +564,15 @@ public class ActiveScanner {
                                     if (slashIdx > 0) {
                                         baseIp = network.substring(0, slashIdx);
                                     }
+                                    if (!looksGlobalUnicast(baseIp)) continue;
 
-                                    if (!looksGlobalUnicast(baseIp)) {
-                                        continue;
-                                    }
                                     pool.add(baseIp);
                                 }
                             }
                         }
                     } catch (IOException e) {
                         if (debug) {
-                            System.err.println("[RandomPool] Fehler beim Lesen ASN-Blocks-CSV: " + e.getMessage());
+                            System.err.println("[RandomPool] ASN-Blocks-CSV: " + e.getMessage());
                         }
                     }
                 }
@@ -587,129 +583,156 @@ public class ActiveScanner {
                 System.out.printf(Locale.ROOT,
                         "[RandomPool] Gesamt-Poolgröße aus CSVs: %,d%n",
                         list.size());
+            } else {
+                System.out.println("[RandomPool] Achtung: CSV-Pool ist leer – keine Zufallsziele möglich.");
             }
             return list;
         }
 
+        /**
+         * Zufallsstichprobe N IPs aus dem über CSV aufgebauten Pool.
+         * KEIN Fallback mehr auf „randomGlobalIp + MMDB“.
+         */
+        List<HostPort> buildRandomSampleTargets(List<Integer> ports) {
+            List<HostPort> out = new ArrayList<>();
+            if (randomSampleCount <= 0) return out;
+
+            if (randomIpPoolFromCsv.isEmpty()) {
+                System.err.println("[RandomSample] CSV-Pool ist leer (Country-/ASN-CSV fehlen oder keine passenden Länder/ASNs) – Zufallsstichprobe wird übersprungen.");
+                return out;
+            }
+
+            List<String> pool = new ArrayList<>(randomIpPoolFromCsv);
+            Collections.shuffle(pool, random);
+
+            int count = Math.min(randomSampleCount, pool.size());
+            for (int i = 0; i < count; i++) {
+                String ip = pool.get(i);
+                for (int p : ports) {
+                    out.add(new HostPort(ip, p));
+                }
+            }
+
+            System.out.printf(Locale.ROOT,
+                    "[RandomSample-CSV] angefordert=%d, pool=%d, verwendet=%d%n",
+                    randomSampleCount, randomIpPoolFromCsv.size(), count);
+            return out;
+        }
+
         List<HostPort> buildCountryFullTargets(List<Integer> ports) {
             List<HostPort> out = new ArrayList<>();
-            if (countryBlocksCsvPath == null || countryLocationsCsvPath == null) {
-                System.err.println("[CountryFullScan] CSV-Dateien nicht gesetzt – überspringe Vollscan.");
+            if (countryBlocksCsvPath == null) {
+                System.err.println("[CountryFullScan] Keine Country-Blocks-CSV konfiguriert – Vollscan nicht möglich.");
                 return out;
             }
 
-            // Wenn fullScanCountries leer ist, auf allowedCountries zurückfallen.
-            // Wenn beides leer ist -> KEIN Filter (alle Länder).
-            Set<String> wanted = new HashSet<>();
-            if (fullScanCountries != null && !fullScanCountries.isEmpty()) {
-                for (String c : fullScanCountries) {
-                    if (c != null && !c.isBlank()) {
-                        wanted.add(c.trim().toUpperCase(Locale.ROOT));
-                    }
-                }
-            } else if (!allowedCountries.isEmpty()) {
-                wanted.addAll(allowedCountries);
-            }
-            boolean filterEnabled = !wanted.isEmpty();
-
-            Path locPath = Path.of(countryLocationsCsvPath);
             Path blocksPath = Path.of(countryBlocksCsvPath);
-            if (!Files.exists(locPath) || !Files.exists(blocksPath)) {
-                System.err.println("[CountryFullScan] CSV-Dateien nicht gefunden: " +
-                        locPath + " / " + blocksPath);
+            if (!Files.exists(blocksPath)) {
+                System.err.println("[CountryFullScan] Country-Blocks-CSV fehlt: " + blocksPath);
                 return out;
+            }
+
+            Set<String> wanted;
+            boolean filterEnabled;
+            if (fullScanCountries != null && !fullScanCountries.isEmpty()) {
+                wanted = new HashSet<>(fullScanCountries);
+                filterEnabled = true;
+            } else if (!allowedCountries.isEmpty()) {
+                wanted = new HashSet<>(allowedCountries);
+                filterEnabled = true;
+            } else {
+                wanted = Collections.emptySet();
+                filterEnabled = false;
             }
 
             Map<String, String> geoIdToIso = new HashMap<>();
+            if (countryLocationsCsvPath != null) {
+                Path locPath = Path.of(countryLocationsCsvPath);
+                if (Files.exists(locPath)) {
+                    try (BufferedReader br = Files.newBufferedReader(locPath, StandardCharsets.UTF_8)) {
+                        String header = br.readLine();
+                        if (header != null) {
+                            String[] cols = header.split(",", -1);
+                            int idxGeo = indexOf(cols, "geoname_id");
+                            int idxIso = indexOf(cols, "country_iso_code");
+                            if (idxGeo >= 0 && idxIso >= 0) {
+                                String line;
+                                while ((line = br.readLine()) != null) {
+                                    if (line.isBlank()) continue;
+                                    String[] f = line.split(",", -1);
+                                    if (f.length <= Math.max(idxGeo, idxIso)) continue;
+                                    String geoId = f[idxGeo].trim();
+                                    String iso = f[idxIso].trim();
+                                    if (!geoId.isEmpty() && !iso.isEmpty()) {
+                                        geoIdToIso.put(geoId, iso.toUpperCase(Locale.ROOT));
+                                    }
+                                }
+                            }
+                        }
+                    } catch (IOException e) {
+                        if (debug) {
+                            System.err.println("[CountryFullScan] Country-Locations-CSV: " + e.getMessage());
+                        }
+                    }
+                }
+            }
 
-            try (BufferedReader br = Files.newBufferedReader(locPath, StandardCharsets.UTF_8)) {
+            long countBlocks = 0;
+
+            try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
                 String header = br.readLine();
-                if (header == null) {
-                    System.err.println("[CountryFullScan] Locations-CSV leer: " + locPath);
-                } else {
+                if (header != null) {
                     String[] cols = header.split(",", -1);
+                    int idxNetwork = indexOf(cols, "network");
+                    int idxRegGeo = indexOf(cols, "registered_country_geoname_id");
                     int idxGeo = indexOf(cols, "geoname_id");
-                    int idxIso = indexOf(cols, "country_iso_code");
-                    if (idxGeo < 0 || idxIso < 0) {
-                        System.err.println("[CountryFullScan] Spalten in Locations-CSV nicht gefunden.");
-                    } else {
+                    if (idxNetwork >= 0) {
                         String line;
                         while ((line = br.readLine()) != null) {
                             if (line.isBlank()) continue;
                             String[] f = line.split(",", -1);
-                            if (f.length <= Math.max(idxGeo, idxIso)) continue;
-                            String geoId = f[idxGeo].trim();
-                            String iso = f[idxIso].trim();
-                            if (!geoId.isEmpty() && !iso.isEmpty()) {
-                                geoIdToIso.put(geoId, iso.toUpperCase(Locale.ROOT));
+                            if (f.length <= idxNetwork) continue;
+
+                            String network = f[idxNetwork].trim();
+                            if (network.isEmpty()) continue;
+                            if (network.contains(":")) continue;
+
+                            String geoId = null;
+                            if (idxRegGeo >= 0 && idxRegGeo < f.length && !f[idxRegGeo].trim().isEmpty()) {
+                                geoId = f[idxRegGeo].trim();
+                            } else if (idxGeo >= 0 && idxGeo < f.length && !f[idxGeo].trim().isEmpty()) {
+                                geoId = f[idxGeo].trim();
+                            }
+
+                            String iso = null;
+                            if (geoId != null && !geoIdToIso.isEmpty()) {
+                                iso = geoIdToIso.get(geoId);
+                                if (iso != null) iso = iso.toUpperCase(Locale.ROOT);
+                            }
+
+                            if (filterEnabled) {
+                                if (iso == null || !wanted.contains(iso)) {
+                                    continue;
+                                }
+                            }
+
+                            countBlocks++;
+
+                            String baseIp = network;
+                            int slashIdx = network.indexOf('/');
+                            if (slashIdx > 0) {
+                                baseIp = network.substring(0, slashIdx);
+                            }
+                            if (!looksGlobalUnicast(baseIp)) continue;
+
+                            for (int p : ports) {
+                                out.add(new HostPort(baseIp, p));
                             }
                         }
                     }
                 }
             } catch (IOException e) {
-                System.err.println("[CountryFullScan] Fehler beim Lesen Locations-CSV: " + e.getMessage());
-                return out;
-            }
-
-            long countBlocks = 0;
-            try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
-                String header = br.readLine();
-                if (header == null) {
-                    System.err.println("[CountryFullScan] Blocks-CSV leer: " + blocksPath);
-                    return out;
-                }
-                String[] cols = header.split(",", -1);
-                int idxNetwork = indexOf(cols, "network");
-                int idxRegGeo = indexOf(cols, "registered_country_geoname_id");
-                int idxGeo = indexOf(cols, "geoname_id");
-                if (idxNetwork < 0) {
-                    System.err.println("[CountryFullScan] Spalte 'network' nicht gefunden.");
-                    return out;
-                }
-
-                String line;
-                while ((line = br.readLine()) != null) {
-                    if (line.isBlank()) continue;
-                    String[] f = line.split(",", -1);
-                    if (f.length <= idxNetwork) continue;
-
-                    String network = f[idxNetwork].trim();
-                    if (network.isEmpty()) continue;
-                    if (network.contains(":")) continue;
-
-                    String geoId = null;
-                    if (idxRegGeo >= 0 && idxRegGeo < f.length && !f[idxRegGeo].trim().isEmpty()) {
-                        geoId = f[idxRegGeo].trim();
-                    } else if (idxGeo >= 0 && idxGeo < f.length && !f[idxGeo].trim().isEmpty()) {
-                        geoId = f[idxGeo].trim();
-                    }
-                    if (geoId == null) continue;
-
-                    String iso = geoIdToIso.get(geoId);
-                    if (iso == null) continue;
-                    iso = iso.toUpperCase(Locale.ROOT);
-
-                    if (filterEnabled && !wanted.contains(iso)) {
-                        continue;
-                    }
-
-                    String baseIp = network;
-                    int slashIdx = network.indexOf('/');
-                    if (slashIdx > 0) {
-                        baseIp = network.substring(0, slashIdx);
-                    }
-
-                    if (!looksGlobalUnicast(baseIp)) {
-                        continue;
-                    }
-
-                    for (int p : ports) {
-                        out.add(new HostPort(baseIp, p));
-                    }
-                    countBlocks++;
-                }
-            } catch (IOException e) {
-                System.err.println("[CountryFullScan] Fehler beim Lesen Blocks-CSV: " + e.getMessage());
+                System.err.println("[CountryFullScan] Fehler beim Lesen Country-Blocks-CSV: " + e.getMessage());
                 return out;
             }
 
@@ -730,105 +753,353 @@ public class ActiveScanner {
             return -1;
         }
 
-        List<HostPort> buildRandomSampleTargets(List<Integer> ports) {
-            List<HostPort> out = new ArrayList<>();
-            if (randomSampleCount <= 0) return out;
+        // ---------- zgrab2: externer TLS-Scanner -----------------------------------------------
 
-            if (!randomIpPoolFromCsv.isEmpty()) {
-                List<String> pool = new ArrayList<>(randomIpPoolFromCsv);
-                Collections.shuffle(pool, random);
+        void scanWithZgrab(List<HostPort> targets) throws IOException {
+            if (adv == null || !adv.useZgrabOnly) {
+                throw new IllegalStateException("scanWithZgrab() aufgerufen, aber useZgrabOnly=false");
+            }
+            if (targets == null || targets.isEmpty()) {
+                System.out.println("[zgrab2] Keine Ziele übergeben.");
+                return;
+            }
 
-                int count = Math.min(randomSampleCount, pool.size());
-                for (int i = 0; i < count; i++) {
-                    String ip = pool.get(i);
-                    for (int p : ports) {
-                        out.add(new HostPort(ip, p));
+            Path parent = outputPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+
+            Map<Integer, LinkedHashSet<String>> portToHosts = new HashMap<>();
+            for (HostPort hp : targets) {
+                portToHosts
+                        .computeIfAbsent(hp.port, k -> new LinkedHashSet<>())
+                        .add(hp.host);
+            }
+
+            for (Map.Entry<Integer, LinkedHashSet<String>> e : portToHosts.entrySet()) {
+                int port = e.getKey();
+                LinkedHashSet<String> hosts = e.getValue();
+                if (hosts.isEmpty()) continue;
+
+                Path ipFile = Files.createTempFile("zgrab_targets_", ".txt");
+                try (BufferedWriter bw = Files.newBufferedWriter(ipFile, StandardCharsets.UTF_8)) {
+                    for (String h : hosts) {
+                        bw.write(h);
+                        bw.newLine();
                     }
                 }
 
-                System.out.printf(Locale.ROOT,
-                        "[RandomSample-CSV] angefordert=%d, pool=%d, verwendet=%d%n",
-                        randomSampleCount, randomIpPoolFromCsv.size(), count);
-                return out;
-            }
-
-            if (countryDb == null && asnDb == null && cityDb == null) {
-                System.err.println("[RandomSample] Keine GeoIP-DB geladen – Zufallsstichprobe wird übersprungen.");
-                return out;
-            }
-
-            int maxAttempts = randomSampleCount * 2000;
-            int attempts = 0;
-
-            while (out.size() < randomSampleCount && attempts < maxAttempts) {
-                attempts++;
-                String ip = (sampleFromCidr != null)
-                        ? randomIpInCidr(sampleFromCidr)
-                        : randomGlobalIp();
-                if (ip == null) continue;
-
-                if (!looksGlobalUnicast(ip)) {
-                    continue;
-                }
-
-                InetAddress addr;
                 try {
-                    addr = InetAddress.getByName(ip);
-                } catch (Exception e) {
-                    if (debug) {
-                        System.err.println("[RandomSample-DNS] " + ip + " -> " + e.getMessage());
-                    }
-                    continue;
-                }
-
-                if (!hasAnyGeoRecord(addr)) {
-                    continue;
-                }
-
-                if (!passesGeoFilters(addr)) {
-                    continue;
-                }
-
-                for (int p : ports) {
-                    out.add(new HostPort(ip, p));
+                    runZgrabAndConvert(ipFile, port);
+                } finally {
+                    try { Files.deleteIfExists(ipFile); } catch (IOException ignore) {}
                 }
             }
-
-            System.out.printf(Locale.ROOT,
-                    "[RandomSample-Fallback] angefordert=%d, erzeugt=%d, Versuche=%d%n",
-                    randomSampleCount, out.size(), attempts);
-
-            return out;
         }
 
-        private boolean hasAnyGeoRecord(InetAddress addr) {
-            boolean found = false;
+        private void runZgrabAndConvert(Path ipFile, int port) throws IOException {
+            String zgrabBin = (adv != null && adv.zgrabBinary != null && !adv.zgrabBinary.isBlank())
+                    ? adv.zgrabBinary
+                    : "zgrab2";
+
+            List<String> cmd = new ArrayList<>();
+            cmd.add(zgrabBin);
+            cmd.add("tls");
+            cmd.add("--port");
+            cmd.add(String.valueOf(port));
+            cmd.add("-f");
+            cmd.add(ipFile.toString());
+
+            int timeoutSec = Math.max(connectTimeoutMs, readTimeoutMs) / 1000;
+            if (timeoutSec <= 0) timeoutSec = 10;
+            cmd.add("--timeout");
+            cmd.add(String.valueOf(timeoutSec));
+
+            if (debug) {
+                System.out.println("[zgrab2] Starte: " + String.join(" ", cmd));
+            }
+
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
+                 BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                         Files.newOutputStream(outputPath,
+                                 StandardOpenOption.CREATE,
+                                 StandardOpenOption.APPEND),
+                         StandardCharsets.UTF_8))) {
+
+                String line;
+                long written = 0;
+
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+
+                    try {
+                        JsonNode root = mapper.readTree(line);
+                        ObjectNode out = convertZgrabRecord(root, port);
+                        if (out == null) {
+                            continue;
+                        }
+                        writer.write(mapper.writeValueAsString(out));
+                        writer.write("\n");
+                        written++;
+                    } catch (Exception e) {
+                        if (debug) {
+                            System.err.println("[zgrab2] JSON-Parse-Fehler: " + e.getMessage());
+                        }
+                    }
+                }
+
+                if (debug) {
+                    System.out.println("[zgrab2] JSONL-Zeilen geschrieben: " + written);
+                }
+            } finally {
+                try {
+                    int exit = p.waitFor();
+                    if (exit != 0 && debug) {
+                        System.err.println("[zgrab2] Exit-Code: " + exit);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+
+        /**
+         * Konvertiert eine zgrab2-JSON-Zeile ins active_scan-Format
+         * (inkl. GeoLite-Felder & Zertifikats-Länder).
+         */
+        private ObjectNode convertZgrabRecord(JsonNode root, int port) {
+            if (root == null || !root.isObject()) return null;
+
+            String ip = root.path("ip").asText(null);
+            if (ip == null || ip.isBlank()) return null;
+
+            JsonNode tls = root.path("data").path("tls");
+            if (tls.isMissingNode()) return null;
+
+            String status = tls.path("status").asText("");
+            if (!"success".equalsIgnoreCase(status)) {
+                return null;
+            }
+
+            JsonNode result = tls.path("result");
+            JsonNode handshake = result.path("handshake_log");
+            JsonNode serverHello = handshake.path("server_hello");
+
+            String version;
+            JsonNode vNode = serverHello.path("version");
+            if (vNode.isTextual()) {
+                version = vNode.asText();
+            } else {
+                version = vNode.path("name").asText(null);
+            }
+
+            String cipherSuite;
+            JsonNode cNode = serverHello.path("cipher_suite");
+            if (cNode.isTextual()) {
+                cipherSuite = cNode.asText();
+            } else {
+                cipherSuite = cNode.path("name").asText(null);
+            }
+
+            String leafPem = null;
+            List<String> chainPem = new ArrayList<>();
+
+            JsonNode certNode = handshake.path("server_certificates").path("certificate");
+            if (certNode != null && certNode.has("raw")) {
+                String raw = certNode.get("raw").asText(null);
+                leafPem = derBase64ToPem(raw);
+            }
+
+            JsonNode chain = handshake.path("server_certificates").path("chain");
+            if (chain != null && chain.isArray()) {
+                for (JsonNode c : chain) {
+                    String raw = c.path("raw").asText(null);
+                    String pem = derBase64ToPem(raw);
+                    if (pem != null) {
+                        chainPem.add(pem);
+                    }
+                }
+            }
+
+            String issuerCountry = null;
+            String subjectCountry = null;
+            String issuerDn = null;
+            String subjectDn = null;
+
             try {
-                if (countryDb != null) {
-                    try {
-                        countryDb.country(addr);
-                        found = true;
-                    } catch (AddressNotFoundException ignored) {}
-                }
-                if (!found && cityDb != null) {
-                    try {
-                        cityDb.city(addr);
-                        found = true;
-                    } catch (AddressNotFoundException ignored) {}
-                }
-                if (!found && asnDb != null) {
-                    try {
-                        asnDb.asn(addr);
-                        found = true;
-                    } catch (AddressNotFoundException ignored) {}
+                if (leafPem != null) {
+                    X509Certificate leafCert = parsePemToX509(leafPem);
+                    if (leafCert != null) {
+                        issuerDn = leafCert.getIssuerX500Principal().getName();
+                        subjectDn = leafCert.getSubjectX500Principal().getName();
+                        issuerCountry = extractCountryFromDn(issuerDn);
+                        subjectCountry = extractCountryFromDn(subjectDn);
+                    }
                 }
             } catch (Exception e) {
                 if (debug) {
-                    System.err.println("[GeoIP-hasAny] " + addr.getHostAddress() + " -> " + e.getMessage());
+                    System.err.println("[zgrab2] Zertifikats-Parsing-Fehler: " + e.getMessage());
                 }
             }
-            return found;
+
+            String countryIso = null;
+            Long asn = null;
+            String cityName = null;
+
+            try {
+                InetAddress addr = InetAddress.getByName(ip);
+
+                if (countryDb != null) {
+                    try {
+                        CountryResponse cResp = countryDb.country(addr);
+                        if (cResp != null && cResp.getCountry() != null) {
+                            countryIso = cResp.getCountry().getIsoCode();
+                            if (countryIso != null) {
+                                countryIso = countryIso.toUpperCase(Locale.ROOT);
+                            }
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (cityDb != null) {
+                    try {
+                        CityResponse cityResp = cityDb.city(addr);
+                        if (cityResp != null) {
+                            if (cityResp.getCity() != null) {
+                                cityName = cityResp.getCity().getName();
+                            }
+                            if (countryIso == null &&
+                                    cityResp.getCountry() != null &&
+                                    cityResp.getCountry().getIsoCode() != null) {
+                                countryIso = cityResp.getCountry().getIsoCode().toUpperCase(Locale.ROOT);
+                            }
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (asnDb != null) {
+                    try {
+                        AsnResponse aResp = asnDb.asn(addr);
+                        if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
+                            asn = aResp.getAutonomousSystemNumber().longValue();
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+
+                // Geo-Filter anwenden
+                if (!allowedCountries.isEmpty()) {
+                    if (countryIso == null || !allowedCountries.contains(countryIso)) {
+                        return null;
+                    }
+                }
+                if (!allowedAsns.isEmpty()) {
+                    if (asn == null || !allowedAsns.contains(asn)) {
+                        return null;
+                    }
+                }
+                if (!allowedCities.isEmpty()) {
+                    if (cityName == null) return null;
+                    String normCity = cityName.trim().toLowerCase(Locale.ROOT);
+                    if (!allowedCities.contains(normCity)) return null;
+                }
+            } catch (Exception e) {
+                if (debug) {
+                    System.err.println("[GeoIP-zgrab] " + ip + " -> " + e.getMessage());
+                }
+                return null;
+            }
+
+            ObjectNode data = mapper.createObjectNode();
+            data.put("ip", ip);
+            data.put("port", port);
+            data.put("hostname", ip);
+
+            if (version != null) data.put("tls_version", version);
+            if (cipherSuite != null) data.put("cipher_suite", cipherSuite);
+            if (countryIso != null) data.put("country_iso", countryIso);
+            if (asn != null) data.put("asn", asn);
+            if (cityName != null) data.put("city_name", cityName);
+
+            if (issuerDn != null) data.put("issuer_dn", issuerDn);
+            if (subjectDn != null) data.put("subject_dn", subjectDn);
+            if (issuerCountry != null) data.put("issuer_country", issuerCountry);
+            if (subjectCountry != null) data.put("subject_country", subjectCountry);
+
+            if (leafPem != null) {
+                ObjectNode leafCertNode = mapper.createObjectNode();
+                leafCertNode.put("pem", leafPem);
+                data.set("leaf_cert", leafCertNode);
+            }
+
+            ArrayNode chainArr = mapper.createArrayNode();
+            for (String pem : chainPem) {
+                chainArr.add(pem);
+            }
+            data.set("chain", chainArr);
+
+            ObjectNode out = mapper.createObjectNode();
+            out.put("message_type", "active_scan");
+            out.set("data", data);
+            return out;
         }
+
+        private String derBase64ToPem(String rawB64) {
+            if (rawB64 == null || rawB64.isBlank()) return null;
+            String b64 = rawB64.replaceAll("\\s", "");
+            StringBuilder sb = new StringBuilder();
+            sb.append("-----BEGIN CERTIFICATE-----\n");
+            for (int i = 0; i < b64.length(); i += 64) {
+                int end = Math.min(i + 64, b64.length());
+                sb.append(b64, i, end).append("\n");
+            }
+            sb.append("-----END CERTIFICATE-----\n");
+            return sb.toString();
+        }
+
+        private X509Certificate parsePemToX509(String pem) {
+            if (pem == null || pem.isBlank()) return null;
+            try {
+                String stripped = pem
+                        .replace("-----BEGIN CERTIFICATE-----", "")
+                        .replace("-----END CERTIFICATE-----", "")
+                        .replaceAll("\\s+", "");
+                byte[] der = Base64.getDecoder().decode(stripped);
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                return (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der));
+            } catch (Exception e) {
+                if (debug) {
+                    System.err.println("[PEM->X509] " + e.getMessage());
+                }
+                return null;
+            }
+        }
+
+        private String extractCountryFromDn(String dn) {
+            if (dn == null || dn.isBlank()) return null;
+            try {
+                LdapName ldapName = new LdapName(dn);
+                for (Rdn rdn : ldapName.getRdns()) {
+                    if ("C".equalsIgnoreCase(rdn.getType())) {
+                        Object val = rdn.getValue();
+                        if (val != null) {
+                            String c = val.toString().trim();
+                            if (!c.isEmpty()) return c;
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                if (debug) {
+                    System.err.println("[DN] Fehler beim Parsen von '" + dn + "': " + e.getMessage());
+                }
+            }
+            return null;
+        }
+
+        // ---------- interne Java-TLS-Engine -----------------------------------------------------
 
         void scanHostPortList(List<HostPort> targets) throws IOException {
             if (targets == null || targets.isEmpty()) {
@@ -844,141 +1115,77 @@ public class ActiveScanner {
                     Files.newOutputStream(outputPath,
                             StandardOpenOption.CREATE,
                             StandardOpenOption.APPEND),
-                    StandardCharsets.UTF_8
-            ));
+                    StandardCharsets.UTF_8));
 
-            ExecutorService pool = Executors.newFixedThreadPool(maxConcurrency);
-            final AtomicLong processed = new AtomicLong();
-            final AtomicLong written = new AtomicLong();
-            final Instant start = Instant.now();
+            ExecutorService executor = Executors.newFixedThreadPool(maxConcurrency);
+            AtomicLong counter = new AtomicLong(0);
+            AtomicLong written = new AtomicLong(0);
+            Instant start = Instant.now();
 
-            System.out.println("[ActiveScan] Ziele gesamt: " + targets.size() + "  -> " + outputPath);
-            System.out.println("[ActiveScan] Parallelität=" + maxConcurrency +
-                    ", Timeout=" + connectTimeoutMs + "/" + readTimeoutMs + " ms");
-
-            for (HostPort hp : targets) {
-                pool.submit(() -> {
-                    try {
-                        handleOneTarget(hp.host, hp.port, writer, written);
-                    } catch (Exception e) {
-                        if (debug) {
-                            System.err.println("[ActiveScan] Fehler bei " + hp.host + ":" + hp.port +
-                                    " -> " + e.getMessage());
+            try {
+                List<Future<?>> futures = new ArrayList<>();
+                for (HostPort hp : targets) {
+                    futures.add(executor.submit(() -> {
+                        try {
+                            handleOneTarget(hp, writer, counter, written, start);
+                        } catch (Exception e) {
+                            if (debug) {
+                                System.err.println("[ActiveScan] Fehler bei Ziel " + hp.host + ":" + hp.port + " -> " + e.getMessage());
+                            }
                         }
-                    } finally {
-                        long p = processed.incrementAndGet();
-                        if (p % 100 == 0) {
-                            double secs = Math.max(1, Duration.between(start, Instant.now()).toSeconds());
-                            double rate = p / secs;
-                            System.out.printf(Locale.ROOT,
-                                    "\r[ActiveScan] Verarbeitet: %,d  Geschrieben: %,d  (%.2f Ziele/s)",
-                                    p, written.get(), rate);
+                    }));
+                }
+
+                for (Future<?> f : futures) {
+                    try {
+                        f.get();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (ExecutionException e) {
+                        if (debug) {
+                            System.err.println("[ActiveScan] Task-Fehler: " + e.getCause());
                         }
                     }
-                });
-            }
-
-            pool.shutdown();
-            try {
-                pool.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-
-            synchronized (writer) {
+                }
+            } finally {
+                executor.shutdownNow();
                 try {
                     writer.flush();
+                } catch (IOException ignored) {}
+                try {
                     writer.close();
-                } catch (IOException ignore) {}
-            }
-
-            System.out.println();
-            System.out.println("[ActiveScan] Fertig. Targets verarbeitet: " + processed.get()
-                    + ", JSONL-Zeilen geschrieben: " + written.get());
-
-            if (written.get() == 0) {
-                System.out.println("[ActiveScan] Hinweis: Es wurden keine Hosts mit erfolgreichem TLS-Handshake und Zertifikat gefunden.");
+                } catch (IOException ignored) {}
+                Duration d = Duration.between(start, Instant.now());
+                System.out.println("[ActiveScan] Fertig. Dauer: " + d.toSeconds() + " s, gescannte Ziele: " + counter.get() + ", geschrieben: " + written.get());
             }
         }
 
-        private void handleOneTarget(String host,
-                                     int port,
+        private void handleOneTarget(HostPort hp,
                                      BufferedWriter writer,
-                                     AtomicLong written) {
+                                     AtomicLong counter,
+                                     AtomicLong written,
+                                     Instant startTime) throws IOException {
 
             InetAddress addr;
             try {
-                addr = InetAddress.getByName(host);
+                addr = InetAddress.getByName(hp.host);
             } catch (Exception e) {
-                if (debug) System.err.println("[DNS] " + host + " -> " + e.getMessage());
+                if (debug) {
+                    System.err.println("[ActiveScan] DNS-Fehler für " + hp.host + ": " + e.getMessage());
+                }
                 return;
             }
 
-            String ipStr = addr.getHostAddress();
-
-            String countryIso = null;
-            Long asn = null;
-            String cityName = null;
-
-            try {
-                if (countryDb != null) {
-                    try {
-                        CountryResponse cResp = countryDb.country(addr);
-                        if (cResp != null && cResp.getCountry() != null) {
-                            countryIso = cResp.getCountry().getIsoCode();
-                            if (countryIso != null) {
-                                countryIso = countryIso.toUpperCase(Locale.ROOT);
-                            }
-                        }
-                    } catch (AddressNotFoundException ignored) {}
+            if (!passesGeoFilters(addr)) {
+                if (debug) {
+                    System.out.println("[ActiveScan] " + addr.getHostAddress() + " fällt durch Geo-Filter.");
                 }
-                if (cityDb != null) {
-                    try {
-                        CityResponse cityResp = cityDb.city(addr);
-                        if (cityResp != null && cityResp.getCity() != null) {
-                            cityName = cityResp.getCity().getName();
-                        }
-                        if (countryIso == null && cityResp != null &&
-                                cityResp.getCountry() != null &&
-                                cityResp.getCountry().getIsoCode() != null) {
-                            countryIso = cityResp.getCountry().getIsoCode().toUpperCase(Locale.ROOT);
-                        }
-                    } catch (AddressNotFoundException ignored) {}
-                }
-                if (asnDb != null) {
-                    try {
-                        AsnResponse aResp = asnDb.asn(addr);
-                        if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
-                            asn = aResp.getAutonomousSystemNumber().longValue();
-                        }
-                    } catch (AddressNotFoundException ignored) {}
-                }
-            } catch (Exception e) {
-                if (debug) System.err.println("[GeoIP] " + ipStr + " -> " + e.getMessage());
+                return;
             }
 
-            if (!allowedCountries.isEmpty()) {
-                if (countryIso == null || !allowedCountries.contains(countryIso)) {
-                    return;
-                }
-            }
-            if (!allowedAsns.isEmpty()) {
-                if (asn == null || !allowedAsns.contains(asn)) {
-                    return;
-                }
-            }
-            if (!allowedCities.isEmpty()) {
-                if (cityName == null) {
-                    return;
-                }
-                String normCity = cityName.trim().toLowerCase(Locale.ROOT);
-                if (!allowedCities.contains(normCity)) {
-                    return;
-                }
-            }
-
-            SSLSocket ssl = null;
             Socket plain = null;
+            SSLSocket ssl = null;
 
             String protocol = null;
             String cipherSuite = null;
@@ -987,29 +1194,27 @@ public class ActiveScanner {
 
             try {
                 plain = new Socket();
-                plain.connect(new InetSocketAddress(addr, port), connectTimeoutMs);
+                plain.connect(new InetSocketAddress(addr, hp.port), connectTimeoutMs);
                 plain.setSoTimeout(readTimeoutMs);
 
                 SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-                ssl = (SSLSocket) factory.createSocket(plain, host, port, true);
+                ssl = (SSLSocket) factory.createSocket(plain, hp.host, hp.port, true);
 
                 SSLParameters params = ssl.getSSLParameters();
-                if (!isIpv4Literal(host)) {
-                    List<SNIHostName> sni = Collections.singletonList(new SNIHostName(host));
-                    params.setServerNames(new ArrayList<>(sni));
+                if (!isIpv4Literal(hp.host)) {
+                    params.setServerNames(Collections.singletonList(new SNIHostName(hp.host)));
                 }
                 ssl.setSSLParameters(params);
 
                 ssl.startHandshake();
                 SSLSession session = ssl.getSession();
-
                 protocol = session.getProtocol();
                 cipherSuite = session.getCipherSuite();
-                Certificate[] chain = session.getPeerCertificates();
 
-                if (chain != null && chain.length > 0) {
-                    leaf = (X509Certificate) chain[0];
-                    for (Certificate c : chain) {
+                Certificate[] peer = session.getPeerCertificates();
+                if (peer != null && peer.length > 0) {
+                    leaf = (X509Certificate) peer[0];
+                    for (Certificate c : peer) {
                         if (c instanceof X509Certificate) {
                             String pem = certToPem((X509Certificate) c);
                             if (pem != null) {
@@ -1018,15 +1223,9 @@ public class ActiveScanner {
                         }
                     }
                 }
-
-                if (leaf == null) {
-                    return;
-                }
-
             } catch (Exception e) {
                 if (debug) {
-                    System.err.println("[TLS] " + host + ":" + port + " -> " +
-                            e.getClass().getSimpleName() + ": " + e.getMessage());
+                    System.err.println("[ActiveScan] TLS-Fehler bei " + hp.host + ":" + hp.port + " -> " + e.getMessage());
                 }
                 return;
             } finally {
@@ -1038,55 +1237,29 @@ public class ActiveScanner {
                 }
             }
 
-            ObjectNode data = mapper.createObjectNode();
-            data.put("ip", ipStr);
-            data.put("port", port);
-            data.put("hostname", host);
-            data.put("tls_version", protocol);
-            data.put("cipher_suite", cipherSuite);
-            if (countryIso != null) data.put("country_iso", countryIso);
-            if (asn != null) data.put("asn", asn);
-            if (cityName != null) data.put("city_name", cityName);
+            String ipStr = addr.getHostAddress();
+            String issuerCountry = null;
+            String subjectCountry = null;
+            String issuerDn = null;
+            String subjectDn = null;
 
-            String leafPem = certToPem(leaf);
-            if (leafPem != null) {
-                ObjectNode leafCertNode = mapper.createObjectNode();
-                leafCertNode.put("pem", leafPem);
-                data.set("leaf_cert", leafCertNode);
-            }
-
-            ArrayNode chainArr = mapper.createArrayNode();
-            for (String pem : chainPem) {
-                chainArr.add(pem);
-            }
-            data.set("chain", chainArr);
-
-            ObjectNode root = mapper.createObjectNode();
-            root.put("message_type", "active_scan");
-            root.set("data", data);
-
-            try {
-                String json = mapper.writeValueAsString(root);
-                synchronized (writer) {
-                    writer.write(json);
-                    writer.write("\n");
-                }
-                written.incrementAndGet();
-            } catch (IOException e) {
-                if (debug) {
-                    System.err.println("[Write] Fehler beim Schreiben für " + host + ":" + port +
-                            " -> " + e.getMessage());
+            if (leaf != null) {
+                try {
+                    issuerDn = leaf.getIssuerX500Principal().getName();
+                    subjectDn = leaf.getSubjectX500Principal().getName();
+                    issuerCountry = extractCountryFromDn(issuerDn);
+                    subjectCountry = extractCountryFromDn(subjectDn);
+                } catch (Exception e) {
+                    if (debug) {
+                        System.err.println("[ActiveScan] DN/Länder-Fehler für " + hp.host + ":" + hp.port + " -> " + e.getMessage());
+                    }
                 }
             }
-        }
 
-        private boolean passesGeoFilters(InetAddress addr) {
-            if (allowedCountries.isEmpty() && allowedAsns.isEmpty() && allowedCities.isEmpty()) {
-                return true;
-            }
             String countryIso = null;
             Long asn = null;
             String cityName = null;
+
             try {
                 if (countryDb != null) {
                     try {
@@ -1124,29 +1297,149 @@ public class ActiveScanner {
                 }
             } catch (Exception e) {
                 if (debug) {
-                    System.err.println("[GeoIP-RandomFilter] " + addr.getHostAddress() +
-                            " -> " + e.getMessage());
+                    System.err.println("[GeoIP] " + ipStr + " -> " + e.getMessage());
+                }
+            }
+
+            ObjectNode data = mapper.createObjectNode();
+            data.put("ip", ipStr);
+            data.put("port", hp.port);
+            data.put("hostname", hp.host);
+            data.put("tls_version", protocol);
+            data.put("cipher_suite", cipherSuite);
+            if (countryIso != null) data.put("country_iso", countryIso);
+            if (asn != null) data.put("asn", asn);
+            if (cityName != null) data.put("city_name", cityName);
+            if (issuerDn != null) data.put("issuer_dn", issuerDn);
+            if (subjectDn != null) data.put("subject_dn", subjectDn);
+            if (issuerCountry != null) data.put("issuer_country", issuerCountry);
+            if (subjectCountry != null) data.put("subject_country", subjectCountry);
+
+            String leafPem = certToPem(leaf);
+            if (leafPem != null) {
+                ObjectNode leafCertNode = mapper.createObjectNode();
+                leafCertNode.put("pem", leafPem);
+                data.set("leaf_cert", leafCertNode);
+            }
+
+            ArrayNode chainArr = mapper.createArrayNode();
+            for (String pem : chainPem) {
+                chainArr.add(pem);
+            }
+            data.set("chain", chainArr);
+
+            ObjectNode root = mapper.createObjectNode();
+            root.put("message_type", "active_scan");
+            root.set("data", data);
+
+            try {
+                String json = mapper.writeValueAsString(root);
+                synchronized (writer) {
+                    writer.write(json);
+                    writer.write("\n");
+                }
+                written.incrementAndGet();
+            } catch (IOException e) {
+                if (debug) {
+                    System.err.println("[ActiveScan] Fehler beim Schreiben JSON: " + e.getMessage());
+                }
+            }
+
+            long c = counter.incrementAndGet();
+            if (c % 100 == 0) {
+                Duration d = Duration.between(startTime, Instant.now());
+                double rate = c / Math.max(1.0, d.toSeconds());
+                System.out.printf(Locale.ROOT,
+                        "[ActiveScan] gescannt=%,d geschrieben=%,d (%.2f Ziele/s)%n",
+                        c, written.get(), rate);
+            }
+        }
+
+        private boolean hasAnyGeoRecord(InetAddress addr) {
+            boolean found = false;
+            try {
+                if (countryDb != null) {
+                    try {
+                        countryDb.country(addr);
+                        found = true;
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (!found && cityDb != null) {
+                    try {
+                        cityDb.city(addr);
+                        found = true;
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (!found && asnDb != null) {
+                    try {
+                        asnDb.asn(addr);
+                        found = true;
+                    } catch (AddressNotFoundException ignored) {}
+                }
+            } catch (Exception e) {
+                if (debug) {
+                    System.err.println("[GeoIP-hasAny] " + addr.getHostAddress() + " -> " + e.getMessage());
+                }
+            }
+            return found;
+        }
+
+        private boolean passesGeoFilters(InetAddress addr) {
+            if (allowedCountries.isEmpty() && allowedAsns.isEmpty() && allowedCities.isEmpty()) {
+                return true;
+            }
+            String countryIso = null;
+            Long asn = null;
+            String cityName = null;
+            try {
+                if (countryDb != null) {
+                    try {
+                        CountryResponse cResp = countryDb.country(addr);
+                        if (cResp != null && cResp.getCountry() != null) {
+                            countryIso = cResp.getCountry().getIsoCode();
+                            if (countryIso != null) countryIso = countryIso.toUpperCase(Locale.ROOT);
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (cityDb != null) {
+                    try {
+                        CityResponse cityResp = cityDb.city(addr);
+                        if (cityResp != null) {
+                            if (cityResp.getCity() != null) {
+                                cityName = cityResp.getCity().getName();
+                            }
+                            if (countryIso == null &&
+                                    cityResp.getCountry() != null &&
+                                    cityResp.getCountry().getIsoCode() != null) {
+                                countryIso = cityResp.getCountry().getIsoCode().toUpperCase(Locale.ROOT);
+                            }
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+                if (asnDb != null) {
+                    try {
+                        AsnResponse aResp = asnDb.asn(addr);
+                        if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
+                            asn = aResp.getAutonomousSystemNumber().longValue();
+                        }
+                    } catch (AddressNotFoundException ignored) {}
+                }
+            } catch (Exception e) {
+                if (debug) {
+                    System.err.println("[GeoIP-filter] " + addr.getHostAddress() + " -> " + e.getMessage());
                 }
             }
 
             if (!allowedCountries.isEmpty()) {
-                if (countryIso == null || !allowedCountries.contains(countryIso)) {
-                    return false;
-                }
+                if (countryIso == null || !allowedCountries.contains(countryIso)) return false;
             }
             if (!allowedAsns.isEmpty()) {
-                if (asn == null || !allowedAsns.contains(asn)) {
-                    return false;
-                }
+                if (asn == null || !allowedAsns.contains(asn)) return false;
             }
             if (!allowedCities.isEmpty()) {
-                if (cityName == null) {
-                    return false;
-                }
-                String normCity = cityName.trim().toLowerCase(Locale.ROOT);
-                if (!allowedCities.contains(normCity)) {
-                    return false;
-                }
+                if (cityName == null) return false;
+                String norm = cityName.trim().toLowerCase(Locale.ROOT);
+                if (!allowedCities.contains(norm)) return false;
             }
             return true;
         }
@@ -1178,20 +1471,36 @@ public class ActiveScanner {
 
                 long base = (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
                 int hostBits = 32 - prefix;
-                long hostMask = hostBits == 32 ? 0xFFFFFFFFL : ((1L << hostBits) - 1);
-                long randHost = (long) (random.nextDouble() * (hostMask + 1));
-                long ip = (base & ~hostMask) | (randHost & hostMask);
+                long totalHosts = (hostBits == 32) ? (1L << 32) : (1L << hostBits);
+                if (totalHosts <= 0) return null;
 
+                long offset = (long) (random.nextDouble() * totalHosts);
+                long ip = base + offset;
                 return toIp(ip);
             } catch (Exception e) {
                 if (debug) {
-                    System.err.println("[CIDR] Fehler beim Generieren aus " + cidr + ": " + e.getMessage());
+                    System.err.println("[RandomIP-CIDR] " + cidr + " -> " + e.getMessage());
                 }
                 return null;
             }
         }
 
+        private boolean isIpv4Literal(String host) {
+            String[] parts = host.split("\\.");
+            if (parts.length != 4) return false;
+            for (String p : parts) {
+                try {
+                    int v = Integer.parseInt(p);
+                    if (v < 0 || v > 255) return false;
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private String certToPem(X509Certificate cert) {
+            if (cert == null) return null;
             try {
                 byte[] der = cert.getEncoded();
                 String b64 = Base64.getEncoder().encodeToString(der);

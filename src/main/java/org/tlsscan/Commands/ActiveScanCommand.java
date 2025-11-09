@@ -10,14 +10,18 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.Callable;
 
+/**
+ * CLI-Command für den aktiven Scan.
+ * - Unterstützt Geo-Länderscan (Random / Country-Full) via GeoLite2.
+ * - Kann optional zgrab2 statt der internen Java-TLS-Engine nutzen.
+ * - Geo-Länderscans werden immer über zgrab2 ausgeführt.
+ */
 @Command(
         name = "scan",
         description = {
                 "Aktiver TLS-Scan von Hosts und IP-Adressen mit optionalen GeoIP-Filtern.",
-                "Beispiele:",
-                "  passive-cert-analyzer scan -t google.com --profile web",
-                "  passive-cert-analyzer scan --random-sample-count 10000 --countries AT --profile web",
-                "  passive-cert-analyzer scan --country-full AT --profile web"
+                "Standard ist die interne Java-TLS-Engine.",
+                "Mit --use-zgrab bzw. bei Geo-Länderscans wird zgrab2 als externer Scanner verwendet."
         }
 )
 public class ActiveScanCommand implements Callable<Integer> {
@@ -27,6 +31,13 @@ public class ActiveScanCommand implements Callable<Integer> {
 
     private static Path defaultOutputDir() {
         return Paths.get(System.getProperty("user.dir")).resolve("Scanfiles");
+    }
+
+    private static String defaultZgrabBinary() {
+        return Paths.get(System.getProperty("user.dir"))
+                .resolve("bin")
+                .resolve("zgrab2.bat")
+                .toString();
     }
 
     @Option(names = {"-t", "--targets"},
@@ -44,15 +55,6 @@ public class ActiveScanCommand implements Callable<Integer> {
             split = ",")
     List<Integer> customPorts = new ArrayList<>();
 
-    @Option(names = {"--random-sample-count"},
-            description = "Anzahl zufälliger IPs (0 = keine Zufallsstichprobe)",
-            defaultValue = "0")
-    int randomSampleCount;
-
-    @Option(names = {"--sample-cidr"},
-            description = "CIDR für Zufallsstichprobe (z.B. 0.0.0.0/0, 193.0.0.0/8)")
-    String sampleCidr;
-
     @Option(names = {"--countries"},
             description = "Filter auf Länder-ISO-Codes (z.B. AT,DE,US), basierend auf GeoLite2",
             split = ",")
@@ -68,12 +70,6 @@ public class ActiveScanCommand implements Callable<Integer> {
             split = ",")
     List<Long> asns = new ArrayList<>();
 
-    // Vollständiger Länderscan (ein Host pro GeoLite2-IPv4-Netzblock)
-    @Option(names = {"--country-full"},
-            description = "Vollständiger Scan aller GeoLite2-IPv4-Netzblöcke für diese Länder (ISO-Codes, z.B. AT,DE)",
-            split = ",")
-    List<String> fullCountries = new ArrayList<>();
-
     @Option(names = {"--geoip-country-db"},
             description = "Pfad zur GeoIP Country-DB (Default: ./GeoIP/GeoLite2-Country.mmdb)")
     Path geoipCountryDb;
@@ -86,6 +82,20 @@ public class ActiveScanCommand implements Callable<Integer> {
             description = "Pfad zur GeoIP City-DB (Default: ./GeoIP/GeoLite2-City.mmdb)")
     Path geoipCityDb;
 
+    @Option(names = {"--random-sample-count"},
+            description = "Zufallsstichprobe aus GeoLite-Pool (0 = keine Stichprobe)",
+            defaultValue = "0")
+    int randomSampleCount;
+
+    @Option(names = {"--random-sample-cidr"},
+            description = "Optional: CIDR, aus dem für die Zufallsstichprobe IPs gezogen werden (z.B. 193.0.0.0/8)")
+    String sampleCidr;
+
+    @Option(names = {"--country-full"},
+            description = "Vollständiger Scan aller GeoLite2-IPv4-Netzblöcke für diese Länder (ISO-Codes, z.B. AT,DE)",
+            split = ",")
+    List<String> fullCountries = new ArrayList<>();
+
     @Option(names = {"-o", "--out-file"},
             description = "Dateiname im Output-Ordner ./Scanfiles (default: active_scan.jsonl)",
             defaultValue = "active_scan.jsonl")
@@ -95,21 +105,32 @@ public class ActiveScanCommand implements Callable<Integer> {
             description = "Debug-Logging aktivieren.")
     boolean debug;
 
+    @Option(names = {"--use-zgrab"},
+            description = "Statt der internen Java-TLS-Engine zgrab2 verwenden (für Host/IP-Scans)")
+    boolean useZgrab;
+
+    @Option(names = {"--zgrab-bin"},
+            description = "Pfad zum zgrab2-Binary (Default: ./bin/zgrab2.bat)")
+    String zgrabBin;
+
     @Override
     public Integer call() throws Exception {
 
-        if ((targets == null || targets.isEmpty()) &&
-                randomSampleCount <= 0 &&
-                (fullCountries == null || fullCountries.isEmpty())) {
-            System.err.println("Es wurden weder Ziele (--targets), noch eine Zufallsstichprobe (--random-sample-count), noch ein Vollscan (--country-full) angegeben.");
+        // Geo-Länderscan = wenn entweder Random-Sample oder Country-Full gesetzt ist
+        boolean isGeoCountryScan =
+                (randomSampleCount > 0) ||
+                        (fullCountries != null && !fullCountries.isEmpty());
+
+        if ((targets == null || targets.isEmpty())
+                && !isGeoCountryScan) {
+
+            System.err.println("Es wurden weder konkrete Ziele (--targets), noch Geo-Länderoptionen (--random-sample-count oder --country-full) angegeben.");
             return 1;
         }
 
         List<Integer> ports = new ArrayList<>();
         switch (profile) {
-            case "web" -> {
-                ports.add(443);
-            }
+            case "web" -> ports.add(443);
             case "mail" -> {
                 ports.add(465);
                 ports.add(587);
@@ -119,7 +140,7 @@ public class ActiveScanCommand implements Callable<Integer> {
             case "k8s" -> ports.add(6443);
             case "custom" -> {
                 if (customPorts == null || customPorts.isEmpty()) {
-                    System.err.println("Profil 'custom' verlangt --ports=<Liste>.");
+                    System.err.println("Profil=custom, aber keine --ports angegeben.");
                     return 2;
                 }
                 ports.addAll(customPorts);
@@ -139,9 +160,25 @@ public class ActiveScanCommand implements Callable<Integer> {
         System.out.println("[scan] Output: " + outputFile);
         System.out.println("[scan] Timeout pro Ziel = " + DEFAULT_TIMEOUT_MS + " ms, Parallelität = " + DEFAULT_CONCURRENCY);
 
+        // Effektiv verwendete zgrab-Entscheidung:
+        // - Geo-Länderscan: immer zgrab
+        // - sonst: zgrab nur, wenn --use-zgrab gesetzt
+        boolean useZgrabEffective = isGeoCountryScan || useZgrab;
+
+        if (useZgrabEffective) {
+            if (zgrabBin == null || zgrabBin.isBlank()) {
+                zgrabBin = defaultZgrabBinary();
+            }
+            System.out.println("[scan] Verwende externen TLS-Scanner (zgrab2): " + zgrabBin +
+                    (isGeoCountryScan ? " (Geo-Länderscan erfordert zgrab2)" : ""));
+        } else {
+            System.out.println("[scan] Verwende interne Java-TLS-Engine.");
+        }
+
         Path geoipBase = Paths.get(System.getProperty("user.dir")).resolve("GeoIP");
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
 
+        // MMDB-Defaults
         if (geoipCountryDb != null) {
             adv.geoipCountryDbPath = geoipCountryDb.toString();
         } else {
@@ -161,6 +198,7 @@ public class ActiveScanCommand implements Callable<Integer> {
             if (Files.exists(def)) adv.geoipCityDbPath = def.toString();
         }
 
+        // Filter
         if (countries != null) {
             for (String c : countries) {
                 if (c != null && !c.isBlank()) {
@@ -169,9 +207,9 @@ public class ActiveScanCommand implements Callable<Integer> {
             }
         }
         if (cities != null) {
-            for (String city : cities) {
-                if (city != null && !city.isBlank()) {
-                    adv.cityNames.add(city.trim());
+            for (String c : cities) {
+                if (c != null && !c.isBlank()) {
+                    adv.cityNames.add(c.trim());
                 }
             }
         }
@@ -179,15 +217,23 @@ public class ActiveScanCommand implements Callable<Integer> {
             adv.asns.addAll(asns);
         }
 
-        if (fullCountries != null) {
+        // Geo-Random-Sample
+        adv.randomSampleCount = randomSampleCount;
+        if (sampleCidr != null && !sampleCidr.isBlank()) {
+            adv.sampleFromCidr = sampleCidr.trim();
+        }
+
+        // Geo-Country-Full
+        if (fullCountries != null && !fullCountries.isEmpty()) {
             for (String c : fullCountries) {
                 if (c != null && !c.isBlank()) {
                     adv.fullScanCountries.add(c.trim().toUpperCase(Locale.ROOT));
                 }
             }
+            adv.enableCountryFullScan = true;
         }
 
-        // CSV für Vollscan
+        // CSV-Pfade (für Random-Pool + Country-Full)
         Path blocksCsv = geoipBase.resolve("GeoLite2-Country-Blocks-IPv4.csv");
         Path locCsv = geoipBase.resolve("GeoLite2-Country-Locations-en.csv");
         if (Files.exists(blocksCsv)) {
@@ -197,14 +243,30 @@ public class ActiveScanCommand implements Callable<Integer> {
             adv.countryLocationsCsvPath = locCsv.toString();
         }
 
-        adv.randomSampleCount = randomSampleCount;
-        if (sampleCidr != null && !sampleCidr.isBlank()) {
-            adv.sampleFromCidr = sampleCidr.trim();
+        Path asnCsv = geoipBase.resolve("GeoLite2-ASN-Blocks-IPv4.csv");
+        if (Files.exists(asnCsv)) {
+            adv.asnBlocksCsvPath = asnCsv.toString();
         }
+        Path cityBlocksCsv = geoipBase.resolve("GeoLite2-City-Blocks-IPv4.csv");
+        Path cityLocCsv = geoipBase.resolve("GeoLite2-City-Locations-en.csv");
+        if (Files.exists(cityBlocksCsv)) {
+            adv.cityBlocksCsvPath = cityBlocksCsv.toString();
+        }
+        if (Files.exists(cityLocCsv)) {
+            adv.cityLocationsCsvPath = cityLocCsv.toString();
+        }
+
+        // zgrab-Steuerung
+        adv.useZgrabOnly = useZgrabEffective;
+        if (useZgrabEffective) {
+            adv.zgrabBinary = zgrabBin;
+        }
+
+        List<String> rawTargets = (targets != null) ? targets : Collections.emptyList();
 
         ActiveScanner scanner = new ActiveScanner();
         scanner.scan(
-                targets != null ? targets : Collections.emptyList(),
+                rawTargets,
                 ports,
                 outputFile,
                 null,
