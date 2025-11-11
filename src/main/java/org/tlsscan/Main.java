@@ -19,7 +19,7 @@ import java.util.concurrent.Callable;
         name = "passive-cert-analyzer",
         mixinStandardHelpOptions = true,
         version = "0.6.2",
-        description = "TLS-Zertifikatsplattform: aktiver Scan, Geo-Länderscan, CT-Stream, CT-Poll, Analyse & RootStore-Score."
+        description = "TLS-Zertifikatsplattform: aktiver Scan, Geo-Länderscan, Analyse & RootStore-Score."
 )
 public class Main implements Callable<Integer> {
 
@@ -27,8 +27,6 @@ public class Main implements Callable<Integer> {
         if (args != null && args.length > 0) {
             int exit = new CommandLine(new Main())
                     .addSubcommand("scan", new ActiveScanCommand())
-                    .addSubcommand("ct-stream", new CtStreamCommand())
-                    .addSubcommand("ct-poll", new CtPollCommand())
                     .addSubcommand("analyze", new AnalyzeCommand())
                     .addSubcommand("store-score", new StoreScoreCommand())
                     .execute(args);
@@ -76,20 +74,16 @@ public class Main implements Callable<Integer> {
             System.out.println("\n=== TLS Analyzer – Menü ===");
             System.out.println("1) Aktiver TLS-Scan (konkrete Hosts, IPs & IP-Ranges)");
             System.out.println("2) Geo-Länderscan (GeoLite2, ganze Länder / Zufallsstichprobe)");
-            System.out.println("3) CT-Stream (WebSocket, CertStream, passiv)");
-            System.out.println("4) CT-Poll (HTTP, passiv)");
-            System.out.println("5) JSONL analysieren");
-            System.out.println("6) TrustStore bewerten");
+            System.out.println("3) JSONL analysieren");
+            System.out.println("4) TrustStore bewerten");
             System.out.println("0) Beenden");
 
-            String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4", "5", "6"), null);
+            String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4"), null);
             switch (choice) {
                 case "1" -> runIpScanInteractive(in);
                 case "2" -> runCountryScanInteractive(in);
-                case "3" -> runCtStreamInteractive(in);
-                case "4" -> runCtPollInteractive(in);
-                case "5" -> runAnalyzeInteractive(in);
-                case "6" -> runStoreScoreInteractive(in);
+                case "3" -> runAnalyzeInteractive(in);
+                case "4" -> runStoreScoreInteractive(in);
                 case "0" -> {
                     System.out.println("Auf Wiedersehen.");
                     return;
@@ -120,7 +114,7 @@ public class Main implements Callable<Integer> {
                 "Output-Dateiname (ohne Pfad)",
                 "active_scan_ip");
 
-        Path outputFile = defaultScanDir().resolve(outFileName+".jsonl");
+        Path outputFile = defaultScanDir().resolve(outFileName + ".jsonl");
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
@@ -128,7 +122,7 @@ public class Main implements Callable<Integer> {
                 "Ziele (Hostname/IP/host:port/CIDR, kommagetrennt, z.B. google.com,1.2.3.4,10.0.0.0/24)",
                 "");
         if (targetInput == null || targetInput.isBlank()) {
-            System.out.println("Keine Ziele angegeben – Scan abgebrochen.");
+            System.out.println("Keine Ziele angegeben – Abbruch.");
             return;
         }
 
@@ -177,32 +171,40 @@ public class Main implements Callable<Integer> {
             }
         }
 
-        ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
+        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
-        // Optional: Geo-Infos aus MMDB (nur zur Anreicherung / Filterung, nicht für Zielerzeugung)
-        Path geoipDir = projectRoot().resolve("GeoIP");
-        Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
-        Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
-        Path defCityDb = geoipDir.resolve("GeoLite2-City.mmdb");
+        ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
 
         Path zgrabPath = projectRoot()
                 .resolve("bin")
                 .resolve("zgrab2.exe");
-
         adv.useZgrabOnly = true;
         adv.zgrabBinary = zgrabPath.toString();
 
+        Path geoipDir = projectRoot().resolve("GeoIP");
+
+        // GeoIP-MMDBs (für Geo-Infos)
+        Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
+        Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
+        Path defCityDb = geoipDir.resolve("GeoLite2-City.mmdb");
         if (Files.exists(defCountryDb)) {
             adv.geoipCountryDbPath = defCountryDb.toString();
+            System.out.println("[GeoIP-Country] lade: " + defCountryDb);
+        } else {
+            System.out.println("[GeoIP-Country] Achtung: Datei nicht gefunden: " + defCountryDb);
         }
         if (Files.exists(defAsnDb)) {
             adv.geoipAsnDbPath = defAsnDb.toString();
+            System.out.println("[GeoIP-ASN] lade: " + defAsnDb);
+        } else {
+            System.out.println("[GeoIP-ASN] Achtung: Datei nicht gefunden: " + defAsnDb);
         }
         if (Files.exists(defCityDb)) {
             adv.geoipCityDbPath = defCityDb.toString();
+            System.out.println("[GeoIP-City] lade: " + defCityDb);
+        } else {
+            System.out.println("[GeoIP-City] Hinweis: City-DB nicht gefunden: " + defCityDb);
         }
-
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
         ActiveScanner scanner = new ActiveScanner();
         try {
@@ -212,18 +214,17 @@ public class Main implements Callable<Integer> {
                     outputFile,
                     null,
                     debug,
-                    5000,   // Timeout
-                    100,    // Parallelität
+                    5000,
+                    100,
                     null,
                     adv
             );
-            System.out.println("\nAktiver IP/Range-Scan abgeschlossen. Ergebnisse: " + outputFile);
         } catch (Exception e) {
-            System.err.println("Fehler beim aktiven Scan: " + e.getMessage());
+            System.err.println("Fehler beim Scan: " + e.getMessage());
         }
     }
 
-    // --- 2) Länderscan (GeoLite2) ---------------------------------------------------------
+    // --- 2) Country-Scan (Geo) ------------------------------------------------------------
 
     private static void runCountryScanInteractive(Scanner in) {
         System.out.println("\n--- Geo-Länderscan (GeoLite2) ---");
@@ -234,7 +235,7 @@ public class Main implements Callable<Integer> {
                 "Output-Dateiname (ohne Pfad)",
                 "active_scan_country");
 
-        Path outputFile = defaultScanDir().resolve(outFileName+".jsonl");
+        Path outputFile = defaultScanDir().resolve(outFileName + ".jsonl");
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
@@ -250,12 +251,10 @@ public class Main implements Callable<Integer> {
         }
 
         int randomCount = (int) readLong(in,
-                "Zufallsstichprobe: Anzahl Hosts aus Country-Blocks-CSV (0 = keine Stichprobe)",
+                "Zufallsstichprobe: Anzahl Hosts aus Country-Blocks-CSV (0 = vollständiger Länderscan)",
                 0, 0, 1_000_000);
 
-        boolean enableFullScan = readYesNo(in,
-                "Vollständiger Länderscan (ein Host pro Netzblock) aktivieren? [y/N]",
-                false);
+        boolean enableFullScan = (randomCount == 0);
 
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
         adv.randomSampleCount = randomCount;
@@ -284,108 +283,78 @@ public class Main implements Callable<Integer> {
             adv.geoipCityDbPath = defCityDb.toString();
         }
 
-        // Country-CSV
-        Path blocksCsv = geoipDir.resolve("GeoLite2-Country-Blocks-IPv4.csv");
-        Path locCsv = geoipDir.resolve("GeoLite2-Country-Locations-en.csv");
-        if (Files.exists(blocksCsv)) {
-            adv.countryBlocksCsvPath = blocksCsv.toString();
-        }
-        if (Files.exists(locCsv)) {
-            adv.countryLocationsCsvPath = locCsv.toString();
-        }
-
-        // City-CSV (optional)
-        Path cityBlocksCsv = geoipDir.resolve("GeoLite2-City-Blocks-IPv4.csv");
-        Path cityLocCsv = geoipDir.resolve("GeoLite2-City-Locations-en.csv");
-        if (Files.exists(cityBlocksCsv)) {
-            adv.cityBlocksCsvPath = cityBlocksCsv.toString();
-        }
-        if (Files.exists(cityLocCsv)) {
-            adv.cityLocationsCsvPath = cityLocCsv.toString();
-        }
+        List<Integer> ports = new ArrayList<>();
+        ports.add(443);
 
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
         ActiveScanner scanner = new ActiveScanner();
         try {
             scanner.scan(
-                    Collections.emptyList(),   // keine direkten Ziele
-                    Collections.singletonList(443),
+                    Collections.emptyList(),
+                    ports,
                     outputFile,
                     null,
                     debug,
-                    5000,   // Timeout
-                    100,    // Parallelität
+                    5000,
+                    100,
                     null,
                     adv
             );
-            System.out.println("\nGeo-Länderscan abgeschlossen. Ergebnisse: " + outputFile);
         } catch (Exception e) {
             System.err.println("Fehler beim Länderscan: " + e.getMessage());
         }
     }
 
-    // --- 3) CT-Stream ---------------------------------------------------------------------
+    // --- 3) CT-Stream (wird im Menü nicht mehr verwendet, CLI nur noch intern) ------------
 
-    private static void runCtStreamInteractive(Scanner in) {
-        System.out.println("\n--- CT-Stream (CertStream, WebSocket) ---");
+    static class CtStreamCommand implements Callable<Integer> {
+        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
         Path outDir = defaultScanDir();
-        ensureDir(outDir);
+        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs.jsonl)")
+        String outFile = "certs.jsonl";
+        @Option(names = {"--cert-only"}, description = "Nur ausgewählte Felder speichern.")
+        boolean certOnly = false;
+        @Option(names = {"--duration-seconds"}, description = "Stoppt nach N Sekunden (0 = unbegrenzt).")
+        long durationSeconds = 0;
+        @Option(names = {"--max-events"}, description = "Stoppt nach N Events (0 = unbegrenzt).")
+        long maxEvents = 0;
+        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
+        boolean debug = false;
 
-        String outFileName = promptFree(in,
-                "Output-Dateiname (ohne Pfad)",
-                "certs_stream.jsonl");
-        Path outPath = outDir.resolve(outFileName);
-
-        boolean certOnly = readYesNo(in, "Nur reduzierte Cert-Felder speichern? [y/N]", false);
-        long duration = readLong(in, "Maximale Laufzeit in Sekunden (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-        long maxEvents = readLong(in, "Max. Anzahl Events (0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
-
-        ensureDir(outPath.getParent());
-
-        System.out.println("Hinweis: Nutzung öffentlicher CT-Feeds über CertStream (passiv).");
-        new CertStreamClient(outPath, certOnly, duration, maxEvents, debug, true).run();
+        @Override
+        public Integer call() {
+            System.out.println("CT-Stream ist deaktiviert und wird nicht mehr unterstützt.");
+            return 0;
+        }
     }
 
-    // --- 4) CT-Poll ------------------------------------------------------------------------
-
-    private static void runCtPollInteractive(Scanner in) {
-        System.out.println("\n--- CT-Poll (passiv, HTTP RFC6962 get-entries) ---");
-        String logUrl = promptFree(in, "CT-Log-Basis-URL (--log), z.B. https://ct.googleapis.com/logs/argon2023", "");
-        long start = readLong(in, "Startindex (--start)", 0, 0, Long.MAX_VALUE);
-        int batch = (int) readLong(in, "Batchgröße (--batch, 1-4096)", 256, 1, 4096);
-        int sleepMs = (int) readLong(in, "Pause zwischen Batches in ms (--sleep-ms)", 500, 0, 60000);
-        long maxEntries = readLong(in, "Maximal Einträge (--max-entries, 0 = unbegrenzt)", 0, 0, Long.MAX_VALUE);
-
+    static class CtPollCommand implements Callable<Integer> {
+        @Option(names = {"--log"}, required = true, description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023")
+        String logBase;
+        @Option(names = {"--start"}, description = "Startindex")
+        long start = 0;
+        @Option(names = {"--batch"}, description = "Batchgröße (1-4096)")
+        int batch = 256;
+        @Option(names = {"--sleep-ms"}, description = "Pause zwischen Batches in ms")
+        int sleepMs = 500;
+        @Option(names = {"--max-entries"}, description = "Maximal Einträge (0 = unbegrenzt)")
+        long maxEntries = 0;
+        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
         Path outDir = defaultScanDir();
-        ensureDir(outDir);
+        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs_poll.jsonl)")
+        String outFile = "certs_poll.jsonl";
+        @Option(names = {"--cert-only"}, description = "Nur reduzierte Zertifikatsfelder speichern.")
+        boolean certOnly = true;
+        @Option(names = {"--no-progress"}, description = "Fortschrittsanzeige unterdrücken.")
+        boolean noProgress = false;
+        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
+        boolean debug = false;
 
-        String outFileName = promptFree(in,
-                "Output-Dateiname (ohne Pfad)",
-                "certs_poll.jsonl");
-        Path output = outDir.resolve(outFileName);
-
-        boolean certOnly = readYesNo(in, "Nur reduzierte Zertifikatsfelder speichern? [y/N]", true);
-        boolean noProgress = readYesNo(in, "Fortschrittsanzeige unterdrücken? [y/N]", false);
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
-
-        try {
-            CtPoller poller = new CtPoller(
-                    logUrl,
-                    start,
-                    batch,
-                    sleepMs,
-                    maxEntries,
-                    output,
-                    certOnly,
-                    noProgress,
-                    debug
-            );
-            poller.run();
-            System.out.println("\nCT-Poll abgeschlossen. Ergebnisse: " + output);
-        } catch (Exception e) {
-            System.err.println("Fehler beim CT-Poll: " + e.getMessage());
+        @Override
+        public Integer call() {
+            System.out.println("CT-Poll ist deaktiviert und wird nicht mehr unterstützt.");
+            return 0;
         }
     }
 
@@ -406,18 +375,13 @@ public class Main implements Callable<Integer> {
             return;
         }
 
-        String scoreFile = promptFree(in,
-                "Path zu country_trustscores.json (leer = Default aus Ressourcen)",
-                "");
-        scoreFile = emptyToNull(scoreFile);
-
         boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
 
         Analyzer analyzer = new Analyzer();
         try {
             analyzer.analyze(
                     inPath,
-                    scoreFile,
+                    null,
                     debug
             );
         } catch (Exception e) {
@@ -425,13 +389,13 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    // --- 6) RootStore-Score ---------------------------------------------------------------
+    // --- 6) RootStore-Score ----------------------------------------------------
 
     private static void runStoreScoreInteractive(Scanner in) {
-        System.out.println("\n--- TrustStore-Score ---");
+        System.out.println("\n--- TrustStore-/CA-Bundle-Score (PEM) ---");
         String storePathStr = promptFree(in,
-                "Pfad zum RootStore (Java keystore, z.B. cacerts)",
-                defaultJavaCacerts().toString());
+                "Pfad zum CA-Bundle (PEM, z.B. cacert.pem von Mozilla/Google)",
+                "cacert.pem");
 
         Path storePath = Paths.get(storePathStr);
         if (!Files.exists(storePath)) {
@@ -439,149 +403,82 @@ public class Main implements Callable<Integer> {
             return;
         }
 
-        String password = promptFree(in,
-                "Passwort für den Store (leer = 'changeit')",
-                "changeit");
-
-        String scoresFile = promptFree(in,
-                "Path zu country_trustscores.json (leer = Default aus Ressourcen)",
-                "");
-
-        scoresFile = emptyToNull(scoresFile);
+        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
 
         StoreScorer scorer = new StoreScorer();
         try {
-            scorer.scoreStore(
+            // Passwort ist für PEM egal, wird von scoreStoreAuto ignoriert
+            scorer.scoreStoreAuto(
                     storePath,
-                    password.toCharArray(),
-                    scoresFile
-            );
-        } catch (Exception e) {
-            System.err.println("Fehler beim Bewerten des Stores: " + e.getMessage());
-        }
-    }
-
-    // --- Unterkommandos für picocli CLI ---------------------------------------------------
-
-    static class CtStreamCommand implements Callable<Integer> {
-        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
-        Path outDir = defaultScanDir();
-        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs.jsonl)")
-        String outFile = "certs.jsonl";
-        @Option(names = {"--cert-only"}, description = "Nur ausgewählte Felder speichern.")
-        boolean certOnly = false;
-        @Option(names = {"--duration-seconds"}, description = "Stoppt nach N Sekunden (0 = unbegrenzt).")
-        long durationSeconds = 0;
-        @Option(names = {"--max-events"}, description = "Stoppt nach N Events (0 = unbegrenzt).")
-        long maxEvents = 0;
-        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
-        boolean debug = false;
-
-        @Override
-        public Integer call() {
-            ensureDir(outDir);
-            Path outPath = outDir.resolve(outFile);
-            ensureDir(outPath.getParent());
-            new CertStreamClient(outPath, certOnly, durationSeconds, maxEvents, debug, true).run();
-            return 0;
-        }
-    }
-
-    static class CtPollCommand implements Callable<Integer> {
-        @Option(names = {"--log"}, required = true, description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023")
-        String logBase;
-        @Option(names = {"--start"}, description = "Startindex (default 0)")
-        long start = 0;
-        @Option(names = {"--batch"}, description = "Batchgröße (default 256, max 4096)")
-        int batch = 256;
-        @Option(names = {"--sleep-ms"}, description = "Pause zwischen Batches in ms (default 500)")
-        int sleepMs = 500;
-        @Option(names = {"--max-entries"}, description = "Maximale Anzahl Einträge (0 = unbegrenzt)")
-        long maxEntries = 0;
-        @Option(names = {"-o", "--output"}, description = "Voller Output-Pfad (hat Vorrang vor --out-dir/--out-file).")
-        Path output;
-        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: <Projektroot>/Scanfiles)")
-        Path outDir = defaultScanDir();
-        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs_poll.jsonl)")
-        String outFile = "certs_poll.jsonl";
-        @Option(names = {"--cert-only"}, description = "Nur reduzierte Felder speichern (kleiner).")
-        boolean certOnly = true;
-        @Option(names = {"--no-progress"}, description = "Unterdrückt Live-Status.")
-        boolean noProgress = false;
-        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
-        boolean debug = false;
-
-        @Override
-        public Integer call() throws Exception {
-            Path outPath;
-            if (output != null) {
-                outPath = output;
-            } else {
-                ensureDir(outDir);
-                outPath = outDir.resolve(outFile);
-            }
-            ensureDir(outPath.getParent());
-
-            CtPoller poller = new CtPoller(
-                    logBase,
-                    start,
-                    batch,
-                    sleepMs,
-                    maxEntries,
-                    outPath,
-                    certOnly,
-                    noProgress,
+                    null,
+                    null,   // immer country_trustscores.json aus Ressourcen
                     debug
             );
-            poller.run();
-            return 0;
+        } catch (Exception e) {
+            System.err.println("Fehler beim Bewerten des CA-Bundles: " + e.getMessage());
         }
     }
 
-    // --- Utility-Methoden -----------------------------------------------------------------
 
-    private static String readChoice(Scanner in, String label, Set<String> allowed, String defaultVal) {
+
+    // --- Hilfsfunktionen ------------------------------------------------------------------
+
+    private static String readChoice(Scanner in, String prompt, Set<String> allowed, String defaultVal) {
         while (true) {
-            System.out.print(label + (defaultVal != null ? " [" + defaultVal + "]" : "") + ": ");
-            String s = in.nextLine().trim();
-            if (s.isEmpty() && defaultVal != null) return defaultVal;
-            if (allowed.contains(s)) return s;
+            System.out.print(prompt + (defaultVal != null ? " [" + defaultVal + "]" : "") + ": ");
+            String line = in.nextLine();
+            if (line == null || line.isBlank()) {
+                if (defaultVal != null) return defaultVal;
+                continue;
+            }
+            line = line.trim();
+            if (allowed.contains(line)) {
+                return line;
+            }
             System.out.println("Ungültige Eingabe. Erlaubt: " + allowed);
         }
     }
 
-    private static boolean readYesNo(Scanner in, String label, boolean defaultYes) {
-        String def = defaultYes ? "Y/n" : "y/N";
+    private static boolean readYesNo(Scanner in, String prompt, boolean defaultVal) {
         while (true) {
-            System.out.print(label + " (" + def + "): ");
-            String s = in.nextLine().trim().toLowerCase(Locale.ROOT);
-            if (s.isEmpty()) return defaultYes;
-            if (s.startsWith("y") || s.startsWith("j")) return true;
-            if (s.startsWith("n")) return false;
+            System.out.print(prompt + " ");
+            String line = in.nextLine();
+            if (line == null || line.isBlank()) {
+                return defaultVal;
+            }
+            line = line.trim().toLowerCase(Locale.ROOT);
+            if (line.equals("y") || line.equals("yes") || line.equals("j") || line.equals("ja")) {
+                return true;
+            }
+            if (line.equals("n") || line.equals("no") || line.equals("nein")) {
+                return false;
+            }
             System.out.println("Bitte 'y' oder 'n' eingeben.");
         }
     }
 
-    private static long readLong(Scanner in, String label, long def, long min, long max) {
+    private static long readLong(Scanner in, String prompt, long defaultVal, long min, long max) {
         while (true) {
-            System.out.print(label + " [" + def + "]: ");
-            String s = in.nextLine().trim();
-            if (s.isEmpty()) return def;
+            System.out.print(prompt + " [" + defaultVal + "]: ");
+            String line = in.nextLine();
+            if (line == null || line.isBlank()) {
+                return defaultVal;
+            }
             try {
-                long v = Long.parseLong(s);
+                long v = Long.parseLong(line.trim());
                 if (v < min || v > max) {
-                    System.out.println("Wert außerhalb des erlaubten Bereichs (" + min + "-" + max + ").");
+                    System.out.println("Wert außerhalb des gültigen Bereichs (" + min + "–" + max + ").");
                     continue;
                 }
                 return v;
             } catch (NumberFormatException e) {
-                System.out.println("Bitte eine Zahl eingeben.");
+                System.out.println("Bitte eine gültige Zahl eingeben.");
             }
         }
     }
 
-    private static String promptFree(Scanner in, String label, String defaultVal) {
-        System.out.print(label + " [" + defaultVal + "]: ");
+    private static String promptFree(Scanner in, String prompt, String defaultVal) {
+        System.out.print(prompt + " [" + defaultVal + "]: ");
         String s = in.nextLine();
         if (s == null || s.isBlank()) return defaultVal;
         return s.trim();

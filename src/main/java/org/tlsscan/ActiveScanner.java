@@ -203,8 +203,7 @@ public class ActiveScanner {
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
-            if (!(o instanceof HostPort)) return false;
-            HostPort hostPort = (HostPort) o;
+            if (!(o instanceof HostPort hostPort)) return false;
             return port == hostPort.port && Objects.equals(host, hostPort.host);
         }
 
@@ -281,8 +280,7 @@ public class ActiveScanner {
             if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
             if (b1 == 192 && b2 == 168) return false;
             if (b1 == 127) return false;
-            if (b1 >= 224) return false;
-            return true;
+            return b1 < 224;
         } catch (NumberFormatException e) {
             return false;
         }
@@ -1477,7 +1475,7 @@ public class ActiveScanner {
             if (!allowedCities.isEmpty()) {
                 if (cityName == null) return false;
                 String norm = cityName.trim().toLowerCase(Locale.ROOT);
-                if (!allowedCities.contains(norm)) return false;
+                return allowedCities.contains(norm);
             }
             return true;
         }

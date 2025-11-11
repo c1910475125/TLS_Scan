@@ -2,144 +2,367 @@ package org.tlsscan;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
+import java.util.Base64;
 
 public class StoreScorer {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /**
+     * Auto-Erkennung:
+     * - .pem/.crt/.cer -> als PEM-Bundle bewertet
+     * - sonst -> als Java-Keystore (z.B. cacerts, JKS)
+     *
+     * countryScoresPath = null -> immer country_trustscores.json aus Ressourcen.
+     */
+    public void scoreStoreAuto(Path storePath,
+                               char[] passwordIgnored,
+                               String countryScoresPath,
+                               boolean debug) throws Exception {
+        if (looksLikePemFile(storePath)) {
+            scorePemBundle(storePath, countryScoresPath, debug);
+        } else {
+            throw new IllegalArgumentException(
+                    "Datei sieht nicht wie ein PEM-Zertifikatsbundle aus (kein '-----BEGIN CERTIFICATE-----' gefunden)."
+            );
+        }
+    }
+
+
+    /**
+     * Kompatibilität: alte Signatur ohne debug-Flag.
+     */
     public void scoreStore(Path storePath,
                            char[] password,
                            String countryScoresPath) throws Exception {
+        scoreKeystore(storePath, password, countryScoresPath, false);
+    }
+
+    /**
+     * Bewertet einen Java-Keystore (z.B. cacerts).
+     */
+    public void scoreKeystore(Path storePath,
+                              char[] password,
+                              String countryScoresPath,
+                              boolean debug) throws Exception {
 
         KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
         try (InputStream in = Files.newInputStream(storePath)) {
             ks.load(in, password);
         }
 
-        Map<String, Double> countryScores = loadCountryScoresWithFallback(countryScoresPath);
-
+        List<X509Certificate> certs = new ArrayList<>();
         Enumeration<String> aliases = ks.aliases();
-
-        Map<String, Long> countByCountry = new HashMap<>();
-        Map<String, Double> scoreByCountry = new HashMap<>();
-
-        long totalCerts = 0;
         while (aliases.hasMoreElements()) {
             String alias = aliases.nextElement();
             if (!ks.isCertificateEntry(alias) && !ks.isKeyEntry(alias)) {
                 continue;
             }
+            Certificate c = ks.getCertificate(alias);
+            if (c instanceof X509Certificate cert) {
+                certs.add(cert);
+            }
+        }
 
-            java.security.cert.Certificate c = ks.getCertificate(alias);
-            if (!(c instanceof X509Certificate)) {
+        scoreCertificates(
+                certs,
+                "Java Keystore",
+                storePath,
+                countryScoresPath,
+                debug
+        );
+    }
+
+    /**
+     * Bewertet ein PEM-Bundle (z.B. Mozilla cacert.pem, Google Root-PEM).
+     * Erwartet mehrere "-----BEGIN CERTIFICATE-----" Blöcke.
+     */
+    public void scorePemBundle(Path pemPath,
+                               String countryScoresPath,
+                               boolean debug) throws Exception {
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        List<X509Certificate> certs = new ArrayList<>();
+
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = Files.newBufferedReader(pemPath, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        }
+
+        String pemAll = sb.toString();
+        String[] parts = pemAll.split("-----END CERTIFICATE-----");
+        for (String part : parts) {
+            if (!part.contains("-----BEGIN CERTIFICATE-----")) {
                 continue;
             }
-            totalCerts++;
+            String body = part.substring(part.indexOf("-----BEGIN CERTIFICATE-----")
+                            + "-----BEGIN CERTIFICATE-----".length())
+                    .replaceAll("\\s+", "");
 
-            X509Certificate cert = (X509Certificate) c;
+            if (body.isBlank()) continue;
+
+            try {
+                byte[] der = Base64.getDecoder().decode(body);
+                X509Certificate cert = (X509Certificate) cf.generateCertificate(
+                        new java.io.ByteArrayInputStream(der));
+                certs.add(cert);
+            } catch (IllegalArgumentException | CertificateException e) {
+                if (debug) {
+                    System.err.println("[StoreScorer] PEM-Zertifikat konnte nicht dekodiert werden: " + e.getMessage());
+                }
+            }
+        }
+
+        scoreCertificates(
+                certs,
+                "PEM-Bundle",
+                pemPath,
+                countryScoresPath,
+                debug
+        );
+    }
+
+    /**
+     * Gemeinsame Bewertungslogik für Keystore & PEM-Bundle.
+     * Gewichtung wie bei der JSONL-Analyse:
+     *
+     *  - Pro Land: (#Zertifikate Land / #Zertifikate mit Land & Score) * Trustscore(Land)
+     *  - Gesamtscore = Summe aller Länderbeiträge, liegt in [0,1] (wenn Trustscores in [0,1] liegen)
+     *  - Zertifikate ohne Land oder ohne Score werden für die Score-Berechnung ignoriert,
+     *    aber in der Verteilung mitgeführt (als "??" bzw. ohne Beitrag).
+     */
+    private void scoreCertificates(Collection<X509Certificate> certs,
+                                   String storeType,
+                                   Path storePath,
+                                   String countryScoresPath,
+                                   boolean debug) throws IOException {
+
+        Map<String, Double> countryScores = normalizeScores(loadCountryScoresWithFallback(countryScoresPath));
+
+        Map<String, Long> countByCountry = new HashMap<>();
+        Map<String, Long> countByCountryForScore = new HashMap<>();
+        Map<String, Double> scoreByCountry = new HashMap<>();
+
+        long totalCerts = 0;
+
+        for (X509Certificate cert : certs) {
+            totalCerts++;
 
             String issuerCountry = extractCountryFromDn(cert.getIssuerX500Principal().getName());
             String subjectCountry = extractCountryFromDn(cert.getSubjectX500Principal().getName());
-            String country = issuerCountry != null ? issuerCountry : subjectCountry;
-            if (country == null || country.isBlank()) {
-                country = "??";
+            String rawCountry = issuerCountry != null ? issuerCountry : subjectCountry;
+
+            String countryKey;
+            if (rawCountry == null || rawCountry.isBlank()) {
+                countryKey = "??";
+            } else {
+                countryKey = rawCountry.toUpperCase(Locale.ROOT);
             }
-            country = country.toUpperCase(Locale.ROOT);
 
-            countByCountry.merge(country, 1L, Long::sum);
+            // Statistik: alle Länder zählen
+            countByCountry.merge(countryKey, 1L, Long::sum);
 
-            Double s = countryScores.get(country);
-            if (s != null) {
-                scoreByCountry.merge(country, s, Double::sum);
+            // Für Score-Berechnung: nur bekannte Länder mit Trustscore berücksichtigen
+            if (!"??".equals(countryKey) && countryScores.containsKey(countryKey)) {
+                countByCountryForScore.merge(countryKey, 1L, Long::sum);
             }
         }
 
-        System.out.println("Store: " + storePath);
+        // Gewichtete Länderbeiträge berechnen
+        long totalForScore = countByCountryForScore.values()
+                .stream()
+                .mapToLong(Long::longValue)
+                .sum();
+
+        scoreByCountry.clear();
+        if (totalForScore > 0) {
+            for (Map.Entry<String, Long> e : countByCountryForScore.entrySet()) {
+                String country = e.getKey();
+                long count = e.getValue();
+                Double baseScore = countryScores.get(country);
+                if (baseScore == null) continue;
+
+                double share = (double) count / (double) totalForScore;
+                double contribution = share * baseScore;
+                scoreByCountry.put(country, contribution);
+            }
+        }
+
+        printStoreResult(
+                storeType,
+                storePath,
+                totalCerts,
+                countByCountry,
+                countryScores,
+                scoreByCountry
+        );
+    }
+
+    // --- Ausgabelogik --------------------------------------------------------------------
+
+    private void printStoreResult(String storeType,
+                                  Path path,
+                                  long totalCerts,
+                                  Map<String, Long> countByCountry,
+                                  Map<String, Double> countryScores,
+                                  Map<String, Double> scoreByCountry) {
+
+        System.out.println("Storetyp : " + storeType);
+        System.out.println("Datei    : " + path);
         System.out.println("Zertifikate im Store: " + totalCerts);
 
-        System.out.println("\nVerteilung nach Land (Issuer/Subject):");
-        List<Map.Entry<String, Long>> list = new ArrayList<>(countByCountry.entrySet());
-        list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+        System.out.println();
+        System.out.println("Verteilung nach Land (Issuer/Subject):");
+        System.out.printf("%-5s %10s %15s %22s%n",
+                "Land", "Anzahl", "Trustscore", "Gewichteter Beitrag");
 
-        for (Map.Entry<String, Long> e : list) {
-            String c = e.getKey();
-            long count = e.getValue();
-            Double sc = scoreByCountry.get(c);
-            String scoreStr = (sc != null) ? String.format(Locale.ROOT, "%.4f", sc) : "-";
-            System.out.printf(Locale.ROOT, "%-4s  %,10d  ScoreSum=%s%n", c, count, scoreStr);
+        countByCountry.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .forEach(e -> {
+                    String country = e.getKey();
+                    long count = e.getValue();
+
+                    Double baseScore = countryScores.get(country);
+                    String baseStr = baseScore != null
+                            ? String.format(Locale.ROOT, "%.4f", baseScore)
+                            : "-";
+
+                    Double contrib = scoreByCountry.get(country);
+                    String contribStr = contrib != null
+                            ? String.format(Locale.ROOT, "%.4f", contrib)
+                            : "-";
+
+                    System.out.printf("%-5s %10d %15s %22s%n",
+                            country, count, baseStr, contribStr);
+                });
+
+        double totalScore = scoreByCountry.values()
+                .stream()
+                .mapToDouble(Double::doubleValue)
+                .sum();
+
+        System.out.println();
+        System.out.println("Berechnung des gewichteten Trustscores (Store-basiert):");
+        System.out.println("  - Pro Land: (#Zertifikate Land / #Zertifikate mit Land & Score) * Trustscore(Land)");
+        System.out.println("  - Zertifikate ohne identifizierbares Land oder ohne Score werden in der Tabelle");
+        System.out.println("    geführt (z.B. als \"??\"), aber bei der Score-Berechnung ignoriert.");
+        System.out.println("  - Gesamtscore = Summe aller Länderbeiträge.");
+
+        System.out.println();
+        System.out.println("Gesamtscore (gewichteter Trustscore 0–1): "
+                + String.format(Locale.ROOT, "%.4f", totalScore));
+
+        String classification;
+        if (totalScore > 0.75) {
+            classification = "Hohe Vertrauenswürdigkeit";
+        } else if (totalScore >= 0.5) {
+            classification = "Eingeschränkte Vertrauenswürdigkeit";
+        } else {
+            classification = "Kritische Vertrauenswürdigkeit";
         }
-
-        double totalScore = scoreByCountry.values().stream().mapToDouble(Double::doubleValue).sum();
-        System.out.println("\nGesamtscore (Summe aller Länderscores im Store): " +
-                String.format(Locale.ROOT, "%.4f", totalScore));
+        System.out.println("Einstufung: " + classification);
     }
+
+    // --- Hilfsfunktionen ------------------------------------------------------------------
 
     private String extractCountryFromDn(String dn) {
         if (dn == null) return null;
         String[] parts = dn.split(",");
-        for (String p : parts) {
-            String[] kv = p.trim().split("=");
-            if (kv.length == 2 && kv[0].equalsIgnoreCase("C")) {
-                return kv[1].trim();
+        for (String part : parts) {
+            String p = part.trim();
+            if (p.toUpperCase(Locale.ROOT).startsWith("C=")) {
+                String value = p.substring(2).trim();
+                if (!value.isEmpty()) {
+                    int idx = value.indexOf(' ');
+                    if (idx > 0) {
+                        value = value.substring(0, idx);
+                    }
+                    return value.toUpperCase(Locale.ROOT);
+                }
             }
         }
         return null;
     }
 
-    private Map<String, Double> loadCountryScoresWithFallback(String path) {
-        Map<String, Double> m = new HashMap<>();
-        try {
-            if (path != null && !path.isBlank()) {
-                Path p = Paths.get(path);
-                if (Files.exists(p)) {
-                    try (InputStream in = Files.newInputStream(p)) {
-                        m.putAll(normalizeScores(mapper.readValue(
-                                in,
-                                mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
-                        )));
-                        return m;
-                    }
-                }
+    private Map<String, Double> loadCountryScoresWithFallback(String explicitPath) throws IOException {
+        Map<String, Double> result = new HashMap<>();
+
+        if (explicitPath != null && !explicitPath.isBlank()) {
+            Path p = Path.of(explicitPath);
+            if (!Files.exists(p)) {
+                throw new IOException("country_trustscores.json nicht gefunden: " + p);
             }
-            try (InputStream in = Thread.currentThread().getContextClassLoader()
-                    .getResourceAsStream("country_trustscores.json")) {
-                if (in != null) {
-                    m.putAll(normalizeScores(mapper.readValue(
-                            in,
-                            mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
-                    )));
-                } else {
-                    System.err.println("[StoreScorer] country_trustscores.json nicht in Ressourcen gefunden.");
-                }
+            try (InputStream in = Files.newInputStream(p)) {
+                @SuppressWarnings("unchecked")
+                Map<String, Double> m = mapper.readValue(in, Map.class);
+                result.putAll(m);
             }
-        } catch (Exception e) {
-            System.err.println("[StoreScorer] Fehler beim Laden der Länderscores: " + e.getMessage());
+            return result;
         }
-        return m;
+
+        try (InputStream in = StoreScorer.class.getResourceAsStream("/country_trustscores.json")) {
+            if (in == null) {
+                throw new IOException("Ressource /country_trustscores.json nicht im Classpath gefunden.");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Double> m = mapper.readValue(in, Map.class);
+            result.putAll(m);
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+
+        return result;
     }
 
+    /**
+     * Wie im Analyzer:
+     * - Keys uppercased
+     * - Nur v > 0
+     * - Werte auf [0,1] gekappt, aber NICHT auf Summe 1 normiert.
+     */
     private Map<String, Double> normalizeScores(Map<String, Double> raw) {
         Map<String, Double> out = new HashMap<>();
-        double sum = 0.0;
         for (Map.Entry<String, Double> e : raw.entrySet()) {
             if (e.getKey() == null || e.getValue() == null) continue;
             String k = e.getKey().trim().toUpperCase(Locale.ROOT);
             double v = e.getValue();
             if (v <= 0) continue;
+            if (v > 1.0) v = 1.0;
             out.put(k, v);
-            sum += v;
-        }
-        if (sum <= 0) return out;
-        for (Map.Entry<String, Double> e : out.entrySet()) {
-            out.put(e.getKey(), e.getValue() / sum);
         }
         return out;
     }
+
+    private boolean looksLikePemFile(Path path) {
+        try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            String line;
+            int maxLines = 2000; // reicht locker
+            int count = 0;
+            while ((line = br.readLine()) != null && count++ < maxLines) {
+                if (line.contains("-----BEGIN CERTIFICATE-----")) {
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            // wenn nicht lesbar, ist es für uns sowieso kein gültiges PEM
+        }
+        return false;
+    }
+
 }
