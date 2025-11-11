@@ -9,6 +9,8 @@ import com.maxmind.geoip2.exception.AddressNotFoundException;
 import com.maxmind.geoip2.model.AsnResponse;
 import com.maxmind.geoip2.model.CityResponse;
 import com.maxmind.geoip2.model.CountryResponse;
+import java.nio.file.Paths;
+
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
@@ -810,18 +812,54 @@ public class ActiveScanner {
             cmd.add("-f");
             cmd.add(ipFile.toString());
 
-            int timeoutSec = Math.max(connectTimeoutMs, readTimeoutMs) / 1000;
-            if (timeoutSec <= 0) timeoutSec = 10;
-            cmd.add("--timeout");
-            cmd.add(String.valueOf(timeoutSec));
+            Path blocklist = Paths.get(System.getProperty("user.dir"),
+                    ".config", "zgrab2", "blocklist.conf");
+
+            int connectTimeoutSec = 5;   // z.B. 5 Sekunden für TCP-Handshake
+            int targetTimeoutSec  = 20;  // z.B. 20 Sekunden für kompletten TLS-Handshake
+
+            cmd.add("--connect-timeout");
+            cmd.add(connectTimeoutSec + "s");   // Go-Duration, also "5s", "10s", ...
+            cmd.add("--target-timeout");
+            cmd.add(targetTimeoutSec + "s");
+
+            int senders = 200; // oder z.B. 500, je nach Maschine/Bandbreite
+
+            cmd.add("--senders");
+            cmd.add(String.valueOf(senders));
+
+            try {
+                Files.createDirectories(blocklist.getParent());
+                if (Files.notExists(blocklist)) {
+                    Files.createFile(blocklist);
+                }
+                cmd.add("--blocklist-file");
+                cmd.add(blocklist.toString());
+            } catch (IOException e) {
+                if (debug) {
+                    System.err.println("[zgrab2] Konnte Blocklist-Datei nicht anlegen: " + e.getMessage());
+                }
+                // im Worst Case verwendet zgrab2 wieder das Default-Path-Handling
+            }
 
             if (debug) {
                 System.out.println("[zgrab2] Starte: " + String.join(" ", cmd));
             }
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
             Process p = pb.start();
+
+            if (debug) {
+                new Thread(() -> {
+                    try (BufferedReader err = new BufferedReader(
+                            new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+                        String el;
+                        while ((el = err.readLine()) != null) {
+                            System.err.println("[zgrab2] " + el);
+                        }
+                    } catch (IOException ignored) {}
+                }).start();
+            }
 
             try (BufferedReader br = new BufferedReader(
                     new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));

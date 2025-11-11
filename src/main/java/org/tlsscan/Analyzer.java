@@ -3,178 +3,329 @@ package org.tlsscan;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.*;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 public class Analyzer {
+
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public void analyze(Path input,
+    public void analyze(Path inputJsonl,
                         String countryScoresPath,
                         boolean debug) throws IOException {
 
-        Map<String, Double> countryScores = loadCountryScoresWithFallback(countryScoresPath);
+        final Map<String, Double> countryScores =
+                normalizeScores(loadCountryScoresWithFallback(countryScoresPath));
 
         long lines = 0;
-        long certs = 0;
-        long parsed = 0;
+        long certs = 0;   // Anzahl bewerteter Zertifikate (max. 1 Root pro Zeile)
 
         Map<String, Long> countByCountry = new HashMap<>();
+        Map<String, Long> countByCountryForScore = new HashMap<>();
         Map<String, Double> scoreByCountry = new HashMap<>();
 
-        try (BufferedReader br = Files.newBufferedReader(input)) {
+        CertificateFactory cf;
+        try {
+            cf = CertificateFactory.getInstance("X.509");
+        } catch (CertificateException e) {
+            throw new IllegalStateException("Kann X.509 CertificateFactory nicht initialisieren", e);
+        }
+
+        try (BufferedReader br = Files.newBufferedReader(inputJsonl, StandardCharsets.UTF_8)) {
             String line;
             while ((line = br.readLine()) != null) {
                 lines++;
-                if (line.isBlank()) continue;
+                line = line.trim();
+                if (line.isEmpty()) continue;
 
                 JsonNode root;
                 try {
                     root = mapper.readTree(line);
                 } catch (Exception e) {
                     if (debug) {
-                        System.err.println("[Analyze] JSON-Parse-Fehler in Zeile " + lines + ": " + e.getMessage());
+                        System.err.println("[Analyzer] JSON-Parse-Fehler in Zeile " + lines + ": " + e.getMessage());
                     }
                     continue;
                 }
 
-                JsonNode data = root.path("data");
-                if (data.isMissingNode() || data.isNull()) continue;
+                Set<X509Certificate> certsInLine = new HashSet<>();
+                extractCertificatesRecursive(root, cf, certsInLine, debug);
+                if (certsInLine.isEmpty()) continue;
 
-                JsonNode leaf = data.path("leaf_cert").path("pem");
-                if (!leaf.isTextual()) {
-                    continue;
-                }
+                X509Certificate selected = chooseRootCertificate(certsInLine);
+                if (selected == null) continue;
+
                 certs++;
-                String pem = leaf.asText();
-                if (pem == null) {
-                    continue;
+
+                String issuerCountry = extractCountryFromDn(selected.getIssuerX500Principal().getName());
+                String subjectCountry = extractCountryFromDn(selected.getSubjectX500Principal().getName());
+                String rawCountry = subjectCountry != null ? subjectCountry : issuerCountry;
+
+                String countryKey;
+                if (rawCountry == null || rawCountry.isBlank()) {
+                    countryKey = "??";
+                } else {
+                    countryKey = rawCountry.toUpperCase(Locale.ROOT);
                 }
 
-                X509Certificate cert = pemToX509(pem);
-                if (cert == null) {
-                    continue;
-                }
-                parsed++;
+                countByCountry.merge(countryKey, 1L, Long::sum);
 
-                // Land primär aus Issuer (Aussteller), falls nicht vorhanden aus Subject
-                String issuerCountry = extractCountryFromDn(cert.getIssuerX500Principal().getName());
-                String subjectCountry = extractCountryFromDn(cert.getSubjectX500Principal().getName());
-
-                String country = issuerCountry != null ? issuerCountry : subjectCountry;
-                if (country == null || country.isBlank()) {
-                    country = "??";
-                }
-
-                country = country.toUpperCase(Locale.ROOT);
-
-                countByCountry.merge(country, 1L, Long::sum);
-
-                Double s = countryScores.get(country);
-                if (s != null) {
-                    scoreByCountry.merge(country, s, Double::sum);
+                if (!"??".equals(countryKey) && countryScores.containsKey(countryKey)) {
+                    countByCountryForScore.merge(countryKey, 1L, Long::sum);
                 }
             }
         }
 
         System.out.println("Zeilen gelesen     : " + lines);
         System.out.println("Zertifikate gefunden : " + certs);
-        System.out.println("Zertifikate geparst  : " + parsed);
+        System.out.println("Zertifikate geparst  : " + certs);
 
-        System.out.println("\nVerteilung nach Land (Zertifikatsaussteller / Subject-Country):");
-        List<Map.Entry<String, Long>> list = new ArrayList<>(countByCountry.entrySet());
-        list.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+        // 1) Gewichtete Länder-Beiträge berechnen
+        long totalForScore = countByCountryForScore.values()
+                .stream()
+                .mapToLong(Long::longValue)
+                .sum();
 
-        for (Map.Entry<String, Long> e : list) {
-            String c = e.getKey();
-            long count = e.getValue();
-            Double sc = scoreByCountry.get(c);
-            String scoreStr = (sc != null) ? String.format(Locale.ROOT, "%.4f", sc) : "-";
-            System.out.printf(Locale.ROOT, "%-4s  %,10d  ScoreSum=%s%n", c, count, scoreStr);
+        scoreByCountry.clear();
+        if (totalForScore > 0) {
+            for (Map.Entry<String, Long> e : countByCountryForScore.entrySet()) {
+                String country = e.getKey();
+                long count = e.getValue();
+                Double baseScore = countryScores.get(country);
+                if (baseScore == null) continue;
+
+                double share = (double) count / (double) totalForScore;
+                scoreByCountry.put(country, share * baseScore);
+            }
         }
 
-        double totalScore = scoreByCountry.values().stream().mapToDouble(Double::doubleValue).sum();
-        System.out.println("\nGesamtscore (Summe aller Länderscores): " + String.format(Locale.ROOT, "%.4f", totalScore));
+        // 2) Tabelle ausgeben (sortiert nach Anzahl)
+        System.out.println();
+        System.out.println("Verteilung nach Land (Root-CA-Land):");
+        System.out.printf("%-5s %10s %15s %22s%n",
+                "Land", "Anzahl", "Trustscore", "Gewichteter Beitrag");
+
+        countByCountry.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .forEach(e -> {
+                    String country = e.getKey();
+                    long count = e.getValue();
+
+                    Double baseScore = countryScores.get(country);
+                    String baseStr = baseScore != null
+                            ? String.format(Locale.ROOT, "%.4f", baseScore)
+                            : "-";
+
+                    Double contrib = scoreByCountry.get(country);
+                    String contribStr = contrib != null
+                            ? String.format(Locale.ROOT, "%.4f", contrib)
+                            : "-";
+
+                    System.out.printf("%-5s %10d %15s %22s%n",
+                            country, count, baseStr, contribStr);
+                });
+
+        // 3) Gesamtscore + Erklärung + Klassifizierung
+        double totalScore = scoreByCountry.values()
+                .stream()
+                .mapToDouble(Double::doubleValue)
+                .sum();
+
+        System.out.println();
+        System.out.println("Berechnung des gewichteten Trustscores (Root-CA-basiert):");
+        System.out.println("  - Pro Root-CA-Land: (#Zertifikate Land / #Zertifikate mit Land & Score) * Trustscore(Land)");
+        System.out.println("  - Zertifikate ohne identifizierbares Root-CA-Land werden in der Tabelle als \"??\" geführt,");
+        System.out.println("    aber bei der Score-Berechnung ignoriert.");
+        System.out.println("  - Gesamtscore = Summe aller Länderbeiträge.");
+
+        System.out.println();
+        System.out.println("Gesamtscore (gewichteter Trustscore 0–1): "
+                + String.format(Locale.ROOT, "%.4f", totalScore));
+
+        String classification;
+        if (totalScore > 0.75) {
+            classification = "Hohe Vertrauenswürdigkeit";
+        } else if (totalScore >= 0.5) {
+            classification = "Eingeschränkte Vertrauenswürdigkeit";
+        } else {
+            classification = "Kritische Vertrauenswürdigkeit";
+        }
+        System.out.println("Einstufung: " + classification);
     }
 
-    private X509Certificate pemToX509(String pem) {
-        try {
-            String normalized = pem.replace("-----BEGIN CERTIFICATE-----", "")
-                    .replace("-----END CERTIFICATE-----", "")
-                    .replaceAll("\\s+", "");
-            byte[] der = Base64.getDecoder().decode(normalized);
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            return (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(der));
-        } catch (Exception e) {
-            return null;
+    /**
+     * Wählt das Root-/Top-CA-Zertifikat:
+     * - Wenn nur eins vorhanden ist -> dieses.
+     * - Sonst: Zertifikat, dessen Issuer-DN NICHT als Subject-DN eines anderen Zertifikats vorkommt.
+     * - Fallback: irgendein Zertifikat aus der Menge.
+     */
+    private X509Certificate chooseRootCertificate(Set<X509Certificate> certsInLine) {
+        if (certsInLine == null || certsInLine.isEmpty()) return null;
+        if (certsInLine.size() == 1) return certsInLine.iterator().next();
+
+        for (X509Certificate candidate : certsInLine) {
+            boolean hasParent = false;
+            for (X509Certificate other : certsInLine) {
+                if (candidate == other) continue;
+                if (other.getSubjectX500Principal().equals(candidate.getIssuerX500Principal())) {
+                    hasParent = true;
+                    break;
+                }
+            }
+            if (!hasParent) {
+                return candidate;
+            }
         }
+        return certsInLine.iterator().next();
+    }
+
+    private void extractCertificatesRecursive(JsonNode node,
+                                              CertificateFactory cf,
+                                              Set<X509Certificate> out,
+                                              boolean debug) {
+        if (node == null || node.isNull()) return;
+
+        if (node.isTextual()) {
+            String text = node.asText();
+            if (text.contains("-----BEGIN CERTIFICATE-----")) {
+                parsePemCertificates(text, cf, out, debug);
+                return;
+            }
+            String trimmed = text.trim();
+            if (trimmed.length() >= 100 && looksLikeBase64(trimmed)) {
+                tryDecodeCertificate(trimmed, cf, out, debug);
+            }
+            return;
+        }
+
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                extractCertificatesRecursive(child, cf, out, debug);
+            }
+            return;
+        }
+
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry ->
+                    extractCertificatesRecursive(entry.getValue(), cf, out, debug));
+        }
+    }
+
+    private void parsePemCertificates(String pem,
+                                      CertificateFactory cf,
+                                      Set<X509Certificate> out,
+                                      boolean debug) {
+        String[] parts = pem.split("-----END CERTIFICATE-----");
+        for (String part : parts) {
+            if (!part.contains("-----BEGIN CERTIFICATE-----")) continue;
+            String body = part.substring(part.indexOf("-----BEGIN CERTIFICATE-----")
+                            + "-----BEGIN CERTIFICATE-----".length())
+                    .replaceAll("\\s+", "");
+            tryDecodeCertificate(body, cf, out, debug);
+        }
+    }
+
+    private void tryDecodeCertificate(String b64,
+                                      CertificateFactory cf,
+                                      Set<X509Certificate> out,
+                                      boolean debug) {
+        try {
+            byte[] der = Base64.getDecoder().decode(b64);
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(
+                    new java.io.ByteArrayInputStream(der));
+            out.add(cert);
+        } catch (IllegalArgumentException | CertificateException e) {
+            if (debug) {
+                System.err.println("[Analyzer] Zertifikat konnte nicht dekodiert werden: " + e.getMessage());
+            }
+        }
+    }
+
+    private boolean looksLikeBase64(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!(c >= 'A' && c <= 'Z') &&
+                    !(c >= 'a' && c <= 'z') &&
+                    !(c >= '0' && c <= '9') &&
+                    c != '+' && c != '/' && c != '=') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String extractCountryFromDn(String dn) {
         if (dn == null) return null;
         String[] parts = dn.split(",");
-        for (String p : parts) {
-            String[] kv = p.trim().split("=");
-            if (kv.length == 2 && kv[0].equalsIgnoreCase("C")) {
-                return kv[1].trim();
+        for (String part : parts) {
+            String p = part.trim();
+            if (p.toUpperCase(Locale.ROOT).startsWith("C=")) {
+                String value = p.substring(2).trim();
+                if (!value.isEmpty()) {
+                    int idx = value.indexOf(' ');
+                    if (idx > 0) {
+                        value = value.substring(0, idx);
+                    }
+                    return value.toUpperCase(Locale.ROOT);
+                }
             }
         }
         return null;
     }
 
-    private Map<String, Double> loadCountryScoresWithFallback(String path) {
-        Map<String, Double> m = new HashMap<>();
-        try {
-            if (path != null && !path.isBlank()) {
-                var p = Paths.get(path);
-                if (Files.exists(p)) {
-                    try (InputStream in = Files.newInputStream(p)) {
-                        m.putAll(normalizeScores(mapper.readValue(
-                                in,
-                                mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
-                        )));
-                        return m;
-                    }
-                }
+    private Map<String, Double> loadCountryScoresWithFallback(String explicitPath) throws IOException {
+        Map<String, Double> result = new HashMap<>();
+
+        if (explicitPath != null && !explicitPath.isBlank()) {
+            Path p = Path.of(explicitPath);
+            if (!Files.exists(p)) {
+                throw new IOException("country_trustscores.json nicht gefunden: " + p);
             }
-            try (InputStream in = Thread.currentThread().getContextClassLoader()
-                    .getResourceAsStream("country_trustscores.json")) {
-                if (in != null) {
-                    m.putAll(normalizeScores(mapper.readValue(
-                            in,
-                            mapper.getTypeFactory().constructMapType(Map.class, String.class, Double.class)
-                    )));
-                } else {
-                    System.err.println("[Analyzer] country_trustscores.json nicht in Ressourcen gefunden.");
-                }
+            try (InputStream in = Files.newInputStream(p)) {
+                @SuppressWarnings("unchecked")
+                Map<String, Double> m = mapper.readValue(in, Map.class);
+                result.putAll(m);
             }
-        } catch (Exception e) {
-            System.err.println("[Analyzer] Fehler beim Laden der Länderscores: " + e.getMessage());
+            return result;
         }
-        return m;
+
+        try (InputStream in = Analyzer.class.getResourceAsStream("/country_trustscores.json")) {
+            if (in == null) {
+                throw new IOException("Ressource /country_trustscores.json nicht im Classpath gefunden.");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Double> m = mapper.readValue(in, Map.class);
+            result.putAll(m);
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+
+        return result;
     }
 
     private Map<String, Double> normalizeScores(Map<String, Double> raw) {
         Map<String, Double> out = new HashMap<>();
-        double sum = 0.0;
         for (Map.Entry<String, Double> e : raw.entrySet()) {
             if (e.getKey() == null || e.getValue() == null) continue;
             String k = e.getKey().trim().toUpperCase(Locale.ROOT);
             double v = e.getValue();
             if (v <= 0) continue;
+            if (v > 1.0) v = 1.0;
             out.put(k, v);
-            sum += v;
-        }
-        if (sum <= 0) return out;
-        for (Map.Entry<String, Double> e : out.entrySet()) {
-            out.put(e.getKey(), e.getValue() / sum);
         }
         return out;
     }

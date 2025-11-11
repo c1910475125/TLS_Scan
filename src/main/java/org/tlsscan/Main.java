@@ -7,6 +7,7 @@ import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -97,18 +98,29 @@ public class Main implements Callable<Integer> {
         }
     }
 
+    private static String ensureJsonlName(String name) {
+        if (name == null || name.isBlank()) {
+            return "scan.jsonl";
+        }
+        String trimmed = name.trim();
+        if (!trimmed.toLowerCase(Locale.ROOT).endsWith(".jsonl")) {
+            trimmed += ".jsonl";
+        }
+        return trimmed;
+    }
+
+
     // --- 1) Aktiver Scan: konkrete Ziele / Ranges -----------------------------------------
 
     private static void runIpScanInteractive(Scanner in) {
         System.out.println("\n--- Aktiver TLS-Scan (konkrete Ziele / Ranges) ---");
-        System.out.println("Hinweis: Timeout pro Ziel = 5000 ms, max. 100 parallele Verbindungen.");
         System.out.println("Basis-Output-Ordner: " + defaultScanDir());
 
         String outFileName = promptFree(in,
                 "Output-Dateiname (ohne Pfad)",
-                "active_scan_ip.jsonl");
+                "active_scan_ip");
 
-        Path outputFile = defaultScanDir().resolve(outFileName);
+        Path outputFile = defaultScanDir().resolve(outFileName+".jsonl");
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
@@ -172,6 +184,14 @@ public class Main implements Callable<Integer> {
         Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
         Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
         Path defCityDb = geoipDir.resolve("GeoLite2-City.mmdb");
+
+        Path zgrabPath = projectRoot()
+                .resolve("bin")
+                .resolve("zgrab2.exe");
+
+        adv.useZgrabOnly = true;
+        adv.zgrabBinary = zgrabPath.toString();
+
         if (Files.exists(defCountryDb)) {
             adv.geoipCountryDbPath = defCountryDb.toString();
         }
@@ -208,14 +228,13 @@ public class Main implements Callable<Integer> {
     private static void runCountryScanInteractive(Scanner in) {
         System.out.println("\n--- Geo-Länderscan (GeoLite2) ---");
         System.out.println("Scannt IPs, die in den GeoLite2-Country-Datenbanken liegen.");
-        System.out.println("Hinweis: Timeout pro Ziel = 5000 ms, max. 100 parallele Verbindungen.");
         System.out.println("Basis-Output-Ordner: " + defaultScanDir());
 
         String outFileName = promptFree(in,
                 "Output-Dateiname (ohne Pfad)",
-                "active_scan_country.jsonl");
+                "active_scan_country");
 
-        Path outputFile = defaultScanDir().resolve(outFileName);
+        Path outputFile = defaultScanDir().resolve(outFileName+".jsonl");
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
@@ -242,6 +261,12 @@ public class Main implements Callable<Integer> {
         adv.randomSampleCount = randomCount;
         adv.enableCountryFullScan = enableFullScan;
         adv.countryIsoCodes = isoList;
+
+        Path zgrabPath = projectRoot()
+                .resolve("bin")
+                .resolve("zgrab2.exe");
+        adv.useZgrabOnly = true;
+        adv.zgrabBinary = zgrabPath.toString();
 
         Path geoipDir = projectRoot().resolve("GeoIP");
 

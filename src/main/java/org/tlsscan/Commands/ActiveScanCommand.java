@@ -36,7 +36,7 @@ public class ActiveScanCommand implements Callable<Integer> {
     private static String defaultZgrabBinary() {
         return Paths.get(System.getProperty("user.dir"))
                 .resolve("bin")
-                .resolve("zgrab2.bat")
+                .resolve("zgrab2.exe")   // <- statt zgrab2.bat
                 .toString();
     }
 
