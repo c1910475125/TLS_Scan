@@ -1,11 +1,8 @@
 package org.tlsscan;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,8 +15,6 @@ import java.util.*;
 import java.util.Base64;
 
 public class StoreScorer {
-
-    private final ObjectMapper mapper = new ObjectMapper();
 
     /**
      * Auto-Erkennung:
@@ -153,7 +148,10 @@ public class StoreScorer {
                                    String countryScoresPath,
                                    boolean debug) throws IOException {
 
-        Map<String, Double> countryScores = normalizeScores(loadCountryScoresWithFallback(countryScoresPath));
+        Map<String, Double> countryScores =
+                CountryTrustUtil.normalizeScores(
+                        CountryTrustUtil.loadCountryScoresWithFallback(countryScoresPath)
+                );
 
         Map<String, Long> countByCountry = new HashMap<>();
         Map<String, Long> countByCountryForScore = new HashMap<>();
@@ -164,8 +162,13 @@ public class StoreScorer {
         for (X509Certificate cert : certs) {
             totalCerts++;
 
-            String issuerCountry = extractCountryFromDn(cert.getIssuerX500Principal().getName());
-            String subjectCountry = extractCountryFromDn(cert.getSubjectX500Principal().getName());
+            String issuerCountry = CountryTrustUtil.extractCountryFromDn(
+                    cert.getIssuerX500Principal().getName()
+            );
+            String subjectCountry = CountryTrustUtil.extractCountryFromDn(
+                    cert.getSubjectX500Principal().getName()
+            );
+
             String rawCountry = issuerCountry != null ? issuerCountry : subjectCountry;
 
             String countryKey;
@@ -280,74 +283,6 @@ public class StoreScorer {
     }
 
     // --- Hilfsfunktionen ------------------------------------------------------------------
-
-    private String extractCountryFromDn(String dn) {
-        if (dn == null) return null;
-        String[] parts = dn.split(",");
-        for (String part : parts) {
-            String p = part.trim();
-            if (p.toUpperCase(Locale.ROOT).startsWith("C=")) {
-                String value = p.substring(2).trim();
-                if (!value.isEmpty()) {
-                    int idx = value.indexOf(' ');
-                    if (idx > 0) {
-                        value = value.substring(0, idx);
-                    }
-                    return value.toUpperCase(Locale.ROOT);
-                }
-            }
-        }
-        return null;
-    }
-
-    private Map<String, Double> loadCountryScoresWithFallback(String explicitPath) throws IOException {
-        Map<String, Double> result = new HashMap<>();
-
-        if (explicitPath != null && !explicitPath.isBlank()) {
-            Path p = Path.of(explicitPath);
-            if (!Files.exists(p)) {
-                throw new IOException("country_trustscores.json nicht gefunden: " + p);
-            }
-            try (InputStream in = Files.newInputStream(p)) {
-                @SuppressWarnings("unchecked")
-                Map<String, Double> m = mapper.readValue(in, Map.class);
-                result.putAll(m);
-            }
-            return result;
-        }
-
-        try (InputStream in = StoreScorer.class.getResourceAsStream("/country_trustscores.json")) {
-            if (in == null) {
-                throw new IOException("Ressource /country_trustscores.json nicht im Classpath gefunden.");
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Double> m = mapper.readValue(in, Map.class);
-            result.putAll(m);
-        } catch (UncheckedIOException e) {
-            throw e.getCause();
-        }
-
-        return result;
-    }
-
-    /**
-     * Wie im Analyzer:
-     * - Keys uppercased
-     * - Nur v > 0
-     * - Werte auf [0,1] gekappt, aber NICHT auf Summe 1 normiert.
-     */
-    private Map<String, Double> normalizeScores(Map<String, Double> raw) {
-        Map<String, Double> out = new HashMap<>();
-        for (Map.Entry<String, Double> e : raw.entrySet()) {
-            if (e.getKey() == null || e.getValue() == null) continue;
-            String k = e.getKey().trim().toUpperCase(Locale.ROOT);
-            double v = e.getValue();
-            if (v <= 0) continue;
-            if (v > 1.0) v = 1.0;
-            out.put(k, v);
-        }
-        return out;
-    }
 
     private boolean looksLikePemFile(Path path) {
         try (BufferedReader br = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {

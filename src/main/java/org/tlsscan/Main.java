@@ -5,7 +5,6 @@ import org.tlsscan.Commands.AnalyzeCommand;
 import org.tlsscan.Commands.StoreScoreCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
-import picocli.CommandLine.Option;
 
 
 import java.nio.file.Files;
@@ -92,17 +91,6 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    private static String ensureJsonlName(String name) {
-        if (name == null || name.isBlank()) {
-            return "scan.jsonl";
-        }
-        String trimmed = name.trim();
-        if (!trimmed.toLowerCase(Locale.ROOT).endsWith(".jsonl")) {
-            trimmed += ".jsonl";
-        }
-        return trimmed;
-    }
-
 
     // --- 1) Aktiver Scan: konkrete Ziele / Ranges -----------------------------------------
 
@@ -127,12 +115,9 @@ public class Main implements Callable<Integer> {
         }
 
         List<String> targets = new ArrayList<>();
-        String[] parts = targetInput.split(",");
-        for (String p : parts) {
+        for (String p : targetInput.split(",")) {
             String s = p.trim();
-            if (!s.isEmpty()) {
-                targets.add(s);
-            }
+            if (!s.isEmpty()) targets.add(s);
         }
         if (targets.isEmpty()) {
             System.out.println("Keine gültigen Ziele erkannt – Scan abgebrochen.");
@@ -173,38 +158,18 @@ public class Main implements Callable<Integer> {
 
         boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
 
+        // --- HIER: zgrab erzwingen ---------------------------------------
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
 
         Path zgrabPath = projectRoot()
                 .resolve("bin")
                 .resolve("zgrab2.exe");
-        adv.useZgrabOnly = true;
+        adv.useZgrabOnly = true;                       // <- wichtig!
         adv.zgrabBinary = zgrabPath.toString();
 
-        Path geoipDir = projectRoot().resolve("GeoIP");
-
-        // GeoIP-MMDBs (für Geo-Infos)
-        Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
-        Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
-        Path defCityDb = geoipDir.resolve("GeoLite2-City.mmdb");
-        if (Files.exists(defCountryDb)) {
-            adv.geoipCountryDbPath = defCountryDb.toString();
-            System.out.println("[GeoIP-Country] lade: " + defCountryDb);
-        } else {
-            System.out.println("[GeoIP-Country] Achtung: Datei nicht gefunden: " + defCountryDb);
-        }
-        if (Files.exists(defAsnDb)) {
-            adv.geoipAsnDbPath = defAsnDb.toString();
-            System.out.println("[GeoIP-ASN] lade: " + defAsnDb);
-        } else {
-            System.out.println("[GeoIP-ASN] Achtung: Datei nicht gefunden: " + defAsnDb);
-        }
-        if (Files.exists(defCityDb)) {
-            adv.geoipCityDbPath = defCityDb.toString();
-            System.out.println("[GeoIP-City] lade: " + defCityDb);
-        } else {
-            System.out.println("[GeoIP-City] Hinweis: City-DB nicht gefunden: " + defCityDb);
-        }
+        // optional: GeoIP-Defaults, falls du Geo-Infos im Output haben willst
+        configureGeoIpDefaults(adv, true);
+        // ---------------------------------------------------------------
 
         ActiveScanner scanner = new ActiveScanner();
         try {
@@ -223,6 +188,7 @@ public class Main implements Callable<Integer> {
             System.err.println("Fehler beim Scan: " + e.getMessage());
         }
     }
+
 
     // --- 2) Country-Scan (Geo) ------------------------------------------------------------
 
@@ -267,21 +233,7 @@ public class Main implements Callable<Integer> {
         adv.useZgrabOnly = true;
         adv.zgrabBinary = zgrabPath.toString();
 
-        Path geoipDir = projectRoot().resolve("GeoIP");
-
-        // GeoIP-MMDBs (für Geo-Infos)
-        Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
-        Path defAsnDb = geoipDir.resolve("GeoLite2-ASN.mmdb");
-        Path defCityDb = geoipDir.resolve("GeoLite2-City.mmdb");
-        if (Files.exists(defCountryDb)) {
-            adv.geoipCountryDbPath = defCountryDb.toString();
-        }
-        if (Files.exists(defAsnDb)) {
-            adv.geoipAsnDbPath = defAsnDb.toString();
-        }
-        if (Files.exists(defCityDb)) {
-            adv.geoipCityDbPath = defCityDb.toString();
-        }
+        configureGeoIpDefaults(adv, true);
 
         List<Integer> ports = new ArrayList<>();
         ports.add(443);
@@ -307,56 +259,6 @@ public class Main implements Callable<Integer> {
     }
 
     // --- 3) CT-Stream (wird im Menü nicht mehr verwendet, CLI nur noch intern) ------------
-
-    static class CtStreamCommand implements Callable<Integer> {
-        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
-        Path outDir = defaultScanDir();
-        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs.jsonl)")
-        String outFile = "certs.jsonl";
-        @Option(names = {"--cert-only"}, description = "Nur ausgewählte Felder speichern.")
-        boolean certOnly = false;
-        @Option(names = {"--duration-seconds"}, description = "Stoppt nach N Sekunden (0 = unbegrenzt).")
-        long durationSeconds = 0;
-        @Option(names = {"--max-events"}, description = "Stoppt nach N Events (0 = unbegrenzt).")
-        long maxEvents = 0;
-        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
-        boolean debug = false;
-
-        @Override
-        public Integer call() {
-            System.out.println("CT-Stream ist deaktiviert und wird nicht mehr unterstützt.");
-            return 0;
-        }
-    }
-
-    static class CtPollCommand implements Callable<Integer> {
-        @Option(names = {"--log"}, required = true, description = "CT-Log-Basis-URL, z.B. https://ct.googleapis.com/logs/argon2023")
-        String logBase;
-        @Option(names = {"--start"}, description = "Startindex")
-        long start = 0;
-        @Option(names = {"--batch"}, description = "Batchgröße (1-4096)")
-        int batch = 256;
-        @Option(names = {"--sleep-ms"}, description = "Pause zwischen Batches in ms")
-        int sleepMs = 500;
-        @Option(names = {"--max-entries"}, description = "Maximal Einträge (0 = unbegrenzt)")
-        long maxEntries = 0;
-        @Option(names = {"--out-dir"}, description = "Output-Ordner (default: ./Scanfiles)")
-        Path outDir = defaultScanDir();
-        @Option(names = {"--out-file"}, description = "Output-Dateiname (default: certs_poll.jsonl)")
-        String outFile = "certs_poll.jsonl";
-        @Option(names = {"--cert-only"}, description = "Nur reduzierte Zertifikatsfelder speichern.")
-        boolean certOnly = true;
-        @Option(names = {"--no-progress"}, description = "Fortschrittsanzeige unterdrücken.")
-        boolean noProgress = false;
-        @Option(names = {"--debug"}, description = "Debug-Logging aktivieren.")
-        boolean debug = false;
-
-        @Override
-        public Integer call() {
-            System.out.println("CT-Poll ist deaktiviert und wird nicht mehr unterstützt.");
-            return 0;
-        }
-    }
 
     // --- 5) Analyzer ----------------------------------------------------------------------
 
@@ -456,6 +358,76 @@ public class Main implements Callable<Integer> {
             System.out.println("Bitte 'y' oder 'n' eingeben.");
         }
     }
+
+    private static void configureGeoIpDefaults(ActiveScanner.AdvancedScanOptions adv, boolean log) {
+        Path geoipDir = projectRoot().resolve("GeoIP");
+
+        // MMDBs
+        Path defCountryDb = geoipDir.resolve("GeoLite2-Country.mmdb");
+        Path defAsnDb     = geoipDir.resolve("GeoLite2-ASN.mmdb");
+        Path defCityDb    = geoipDir.resolve("GeoLite2-City.mmdb");
+
+        if (Files.exists(defCountryDb)) {
+            adv.geoipCountryDbPath = defCountryDb.toString();
+            if (log) System.out.println("[GeoIP-Country] lade: " + defCountryDb);
+        } else if (log) {
+            System.out.println("[GeoIP-Country] Achtung: Datei nicht gefunden: " + defCountryDb);
+        }
+
+        if (Files.exists(defAsnDb)) {
+            adv.geoipAsnDbPath = defAsnDb.toString();
+            if (log) System.out.println("[GeoIP-ASN] lade: " + defAsnDb);
+        } else if (log) {
+            System.out.println("[GeoIP-ASN] Achtung: Datei nicht gefunden: " + defAsnDb);
+        }
+
+        if (Files.exists(defCityDb)) {
+            adv.geoipCityDbPath = defCityDb.toString();
+            if (log) System.out.println("[GeoIP-City] lade: " + defCityDb);
+        } else if (log) {
+            System.out.println("[GeoIP-City] Hinweis: City-DB nicht gefunden: " + defCityDb);
+        }
+
+        // CSVs – genau wie im Bugfix oben
+        Path countryBlocksCsv = geoipDir.resolve("GeoLite2-Country-Blocks-IPv4.csv");
+        Path countryLocCsv    = geoipDir.resolve("GeoLite2-Country-Locations-en.csv");
+        if (Files.exists(countryBlocksCsv)) {
+            adv.countryBlocksCsvPath = countryBlocksCsv.toString();
+            if (log) System.out.println("[GeoIP-Country] Country-Blocks-CSV: " + countryBlocksCsv);
+        } else if (log) {
+            System.out.println("[GeoIP-Country] Hinweis: Country-Blocks-CSV nicht gefunden: " + countryBlocksCsv);
+        }
+        if (Files.exists(countryLocCsv)) {
+            adv.countryLocationsCsvPath = countryLocCsv.toString();
+            if (log) System.out.println("[GeoIP-Country] Country-Locations-CSV: " + countryLocCsv);
+        } else if (log) {
+            System.out.println("[GeoIP-Country] Hinweis: Country-Locations-CSV nicht gefunden: " + countryLocCsv);
+        }
+
+        Path asnBlocksCsv = geoipDir.resolve("GeoLite2-ASN-Blocks-IPv4.csv");
+        if (Files.exists(asnBlocksCsv)) {
+            adv.asnBlocksCsvPath = asnBlocksCsv.toString();
+            if (log) System.out.println("[GeoIP-ASN] ASN-Blocks-CSV: " + asnBlocksCsv);
+        } else if (log) {
+            System.out.println("[GeoIP-ASN] Hinweis: ASN-Blocks-CSV nicht gefunden: " + asnBlocksCsv);
+        }
+
+        Path cityBlocksCsv = geoipDir.resolve("GeoLite2-City-Blocks-IPv4.csv");
+        Path cityLocCsv    = geoipDir.resolve("GeoLite2-City-Locations-en.csv");
+        if (Files.exists(cityBlocksCsv)) {
+            adv.cityBlocksCsvPath = cityBlocksCsv.toString();
+            if (log) System.out.println("[GeoIP-City] City-Blocks-CSV: " + cityBlocksCsv);
+        } else if (log) {
+            System.out.println("[GeoIP-City] Hinweis: City-Blocks-CSV nicht gefunden: " + cityBlocksCsv);
+        }
+        if (Files.exists(cityLocCsv)) {
+            adv.cityLocationsCsvPath = cityLocCsv.toString();
+            if (log) System.out.println("[GeoIP-City] City-Locations-CSV: " + cityLocCsv);
+        } else if (log) {
+            System.out.println("[GeoIP-City] Hinweis: City-Locations-CSV nicht gefunden: " + cityLocCsv);
+        }
+    }
+
 
     private static long readLong(Scanner in, String prompt, long defaultVal, long min, long max) {
         while (true) {

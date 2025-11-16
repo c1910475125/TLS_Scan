@@ -9,30 +9,18 @@ import com.maxmind.geoip2.exception.AddressNotFoundException;
 import com.maxmind.geoip2.model.AsnResponse;
 import com.maxmind.geoip2.model.CityResponse;
 import com.maxmind.geoip2.model.CountryResponse;
-import java.nio.file.Paths;
 
-
-import javax.net.ssl.SNIHostName;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStreamReader;
-import java.io.IOException;
-import java.io.OutputStreamWriter;
+import javax.net.ssl.*;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateEncodingException;
@@ -41,8 +29,10 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.Base64;
-import java.util.concurrent.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -433,43 +423,71 @@ public class ActiveScanner {
             try { if (cityDb != null) cityDb.close(); } catch (IOException ignore) {}
         }
 
+        // --- Hilfsfunktion: Country-Locations-CSV ---------------------------------------------
+
+        private Map<String, String> loadCountryGeoIdToIso() {
+            Map<String, String> geoIdToIso = new HashMap<>();
+
+            if (countryLocationsCsvPath == null) {
+                return geoIdToIso;
+            }
+
+            Path locPath = Path.of(countryLocationsCsvPath);
+            if (!Files.exists(locPath)) {
+                if (debug) {
+                    System.err.println("[GeoIP] Country-Locations-CSV fehlt: " + locPath);
+                }
+                return geoIdToIso;
+            }
+
+            try (BufferedReader br = Files.newBufferedReader(locPath, StandardCharsets.UTF_8)) {
+                String header = br.readLine();
+                if (header == null) {
+                    return geoIdToIso;
+                }
+
+                String[] cols = header.split(",", -1);
+                int idxGeo = indexOf(cols, "geoname_id");
+                int idxIso = indexOf(cols, "country_iso_code");
+                if (idxGeo < 0 || idxIso < 0) {
+                    if (debug) {
+                        System.err.println("[GeoIP] Country-Locations-CSV hat keine Spalten geoname_id/country_iso_code.");
+                    }
+                    return geoIdToIso;
+                }
+
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (line.isBlank()) continue;
+                    String[] f = line.split(",", -1);
+                    if (f.length <= Math.max(idxGeo, idxIso)) continue;
+
+                    String geoId = f[idxGeo].trim();
+                    String iso = f[idxIso].trim();
+                    if (!geoId.isEmpty() && !iso.isEmpty()) {
+                        geoIdToIso.put(geoId, iso.toUpperCase(Locale.ROOT));
+                    }
+                }
+            } catch (IOException e) {
+                if (debug) {
+                    System.err.println("[GeoIP] Fehler beim Lesen Country-Locations-CSV: " + e.getMessage());
+                }
+            }
+
+            return geoIdToIso;
+        }
+
+
         // ---------- GeoLite: IP-Pools aus CSV --------------------------------------------------
 
         private List<String> buildRandomIpPoolFromCsv() {
             LinkedHashSet<String> pool = new LinkedHashSet<>();
 
             // Country-CSV (Blocks + Locations)
-            if (countryBlocksCsvPath != null && countryLocationsCsvPath != null) {
-                Path locPath = Path.of(countryLocationsCsvPath);
+            if (countryBlocksCsvPath != null) {
                 Path blocksPath = Path.of(countryBlocksCsvPath);
-                if (Files.exists(locPath) && Files.exists(blocksPath)) {
-                    Map<String, String> geoIdToIso = new HashMap<>();
-                    try (BufferedReader br = Files.newBufferedReader(locPath, StandardCharsets.UTF_8)) {
-                        String header = br.readLine();
-                        if (header != null) {
-                            String[] cols = header.split(",", -1);
-                            int idxGeo = indexOf(cols, "geoname_id");
-                            int idxIso = indexOf(cols, "country_iso_code");
-                            if (idxGeo >= 0 && idxIso >= 0) {
-                                String line;
-                                while ((line = br.readLine()) != null) {
-                                    if (line.isBlank()) continue;
-                                    String[] f = line.split(",", -1);
-                                    if (f.length <= Math.max(idxGeo, idxIso)) continue;
-                                    String geoId = f[idxGeo].trim();
-                                    String iso = f[idxIso].trim();
-                                    if (!geoId.isEmpty() && !iso.isEmpty()) {
-                                        geoIdToIso.put(geoId, iso.toUpperCase(Locale.ROOT));
-                                    }
-                                }
-                            }
-                        }
-                    } catch (IOException e) {
-                        if (debug) {
-                            System.err.println("[RandomPool] Country-Locations-CSV: " + e.getMessage());
-                        }
-                    }
-
+                if (Files.exists(blocksPath)) {
+                    Map<String, String> geoIdToIso = loadCountryGeoIdToIso();
                     Set<String> allowed = allowedCountries.isEmpty() ? null : allowedCountries;
 
                     try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
@@ -528,6 +546,7 @@ public class ActiveScanner {
                     }
                 }
             }
+
 
             // ASN-CSV: nur falls ASN-Filter aktiv
             if (asnBlocksCsvPath != null && !allowedAsns.isEmpty()) {
@@ -645,37 +664,7 @@ public class ActiveScanner {
                 filterEnabled = false;
             }
 
-            Map<String, String> geoIdToIso = new HashMap<>();
-            if (countryLocationsCsvPath != null) {
-                Path locPath = Path.of(countryLocationsCsvPath);
-                if (Files.exists(locPath)) {
-                    try (BufferedReader br = Files.newBufferedReader(locPath, StandardCharsets.UTF_8)) {
-                        String header = br.readLine();
-                        if (header != null) {
-                            String[] cols = header.split(",", -1);
-                            int idxGeo = indexOf(cols, "geoname_id");
-                            int idxIso = indexOf(cols, "country_iso_code");
-                            if (idxGeo >= 0 && idxIso >= 0) {
-                                String line;
-                                while ((line = br.readLine()) != null) {
-                                    if (line.isBlank()) continue;
-                                    String[] f = line.split(",", -1);
-                                    if (f.length <= Math.max(idxGeo, idxIso)) continue;
-                                    String geoId = f[idxGeo].trim();
-                                    String iso = f[idxIso].trim();
-                                    if (!geoId.isEmpty() && !iso.isEmpty()) {
-                                        geoIdToIso.put(geoId, iso.toUpperCase(Locale.ROOT));
-                                    }
-                                }
-                            }
-                        }
-                    } catch (IOException e) {
-                        if (debug) {
-                            System.err.println("[CountryFullScan] Country-Locations-CSV: " + e.getMessage());
-                        }
-                    }
-                }
-            }
+            Map<String, String> geoIdToIso = loadCountryGeoIdToIso();
 
             long countBlocks = 0;
 
@@ -1021,7 +1010,7 @@ public class ActiveScanner {
                     try {
                         AsnResponse aResp = asnDb.asn(addr);
                         if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
-                            asn = aResp.getAutonomousSystemNumber().longValue();
+                            asn = aResp.getAutonomousSystemNumber();
                         }
                     } catch (AddressNotFoundException ignored) {}
                 }

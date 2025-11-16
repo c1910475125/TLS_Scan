@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,7 +22,9 @@ public class Analyzer {
                         boolean debug) throws IOException {
 
         final Map<String, Double> countryScores =
-                normalizeScores(loadCountryScoresWithFallback(countryScoresPath));
+                CountryTrustUtil.normalizeScores(
+                        CountryTrustUtil.loadCountryScoresWithFallback(countryScoresPath)
+                );
 
         long lines = 0;
         long certs = 0;   // Anzahl bewerteter Zertifikate (max. 1 Root pro Zeile)
@@ -66,8 +66,13 @@ public class Analyzer {
 
                 certs++;
 
-                String issuerCountry = extractCountryFromDn(selected.getIssuerX500Principal().getName());
-                String subjectCountry = extractCountryFromDn(selected.getSubjectX500Principal().getName());
+                String issuerCountry = CountryTrustUtil.extractCountryFromDn(
+                        selected.getIssuerX500Principal().getName()
+                );
+                String subjectCountry = CountryTrustUtil.extractCountryFromDn(
+                        selected.getSubjectX500Principal().getName()
+                );
+
                 String rawCountry = subjectCountry != null ? subjectCountry : issuerCountry;
 
                 String countryKey;
@@ -263,65 +268,4 @@ public class Analyzer {
         return true;
     }
 
-    private String extractCountryFromDn(String dn) {
-        if (dn == null) return null;
-        String[] parts = dn.split(",");
-        for (String part : parts) {
-            String p = part.trim();
-            if (p.toUpperCase(Locale.ROOT).startsWith("C=")) {
-                String value = p.substring(2).trim();
-                if (!value.isEmpty()) {
-                    int idx = value.indexOf(' ');
-                    if (idx > 0) {
-                        value = value.substring(0, idx);
-                    }
-                    return value.toUpperCase(Locale.ROOT);
-                }
-            }
-        }
-        return null;
-    }
-
-    private Map<String, Double> loadCountryScoresWithFallback(String explicitPath) throws IOException {
-        Map<String, Double> result = new HashMap<>();
-
-        if (explicitPath != null && !explicitPath.isBlank()) {
-            Path p = Path.of(explicitPath);
-            if (!Files.exists(p)) {
-                throw new IOException("country_trustscores.json nicht gefunden: " + p);
-            }
-            try (InputStream in = Files.newInputStream(p)) {
-                @SuppressWarnings("unchecked")
-                Map<String, Double> m = mapper.readValue(in, Map.class);
-                result.putAll(m);
-            }
-            return result;
-        }
-
-        try (InputStream in = Analyzer.class.getResourceAsStream("/country_trustscores.json")) {
-            if (in == null) {
-                throw new IOException("Ressource /country_trustscores.json nicht im Classpath gefunden.");
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Double> m = mapper.readValue(in, Map.class);
-            result.putAll(m);
-        } catch (UncheckedIOException e) {
-            throw e.getCause();
-        }
-
-        return result;
-    }
-
-    private Map<String, Double> normalizeScores(Map<String, Double> raw) {
-        Map<String, Double> out = new HashMap<>();
-        for (Map.Entry<String, Double> e : raw.entrySet()) {
-            if (e.getKey() == null || e.getValue() == null) continue;
-            String k = e.getKey().trim().toUpperCase(Locale.ROOT);
-            double v = e.getValue();
-            if (v <= 0) continue;
-            if (v > 1.0) v = 1.0;
-            out.put(k, v);
-        }
-        return out;
-    }
 }
