@@ -12,6 +12,10 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
+import java.security.interfaces.RSAPublicKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.DSAPublicKey;
+
 
 public class Analyzer {
 
@@ -32,6 +36,22 @@ public class Analyzer {
         Map<String, Long> countByCountry = new HashMap<>();
         Map<String, Long> countByCountryForScore = new HashMap<>();
         Map<String, Double> scoreByCountry = new HashMap<>();
+        Map<String, Long> tlsVersionCounts = new HashMap<>();
+        Map<String, Long> deprecatedTlsVersionCounts = new HashMap<>();
+
+        Map<String, Long> cipherSuiteCounts = new HashMap<>();
+        Map<String, Long> weakCipherSuiteCounts = new HashMap<>();
+
+        Map<String, Long> keyAlgorithmCounts = new HashMap<>();
+        Map<Integer, Long> keySizeCounts = new HashMap<>();
+        long weakKeyCount = 0L;
+
+        Map<String, Long> signatureAlgorithmCounts = new HashMap<>();
+        long weakSignatureAlgoCount = 0L;
+
+        Map<Integer, Long> chainLengthCounts = new HashMap<>();
+        long chainsWithWeakSig = 0L; // z.B. SHA1/MD5 irgendwo in der Kette
+
 
         CertificateFactory cf;
         try {
@@ -50,6 +70,101 @@ public class Analyzer {
                 JsonNode root;
                 try {
                     root = mapper.readTree(line);
+                    JsonNode dataNode = root.path("data");
+                    if (dataNode != null && dataNode.isObject()) {
+
+                        // --- TLS-Version -----------------------
+                        String tlsVersion = dataNode.path("tls_version").asText(null);
+                        if (tlsVersion != null && !tlsVersion.isBlank()) {
+                            tlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
+                            if (isDeprecatedTlsVersion(tlsVersion)) {
+                                deprecatedTlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
+                            }
+                        }
+
+                        // --- Cipher-Suite ----------------------
+                        String cipherSuite = dataNode.path("cipher_suite").asText(null);
+                        if (cipherSuite != null && !cipherSuite.isBlank()) {
+                            cipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
+                            if (isWeakCipherSuite(cipherSuite)) {
+                                weakCipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
+                            }
+                        }
+
+                        // --- Leaf-Zertifikat einlesen (PEM) ----
+                        X509Certificate leafCert = null;
+                        JsonNode leafPemNode = dataNode.path("leaf_cert").path("pem");
+                        if (leafPemNode.isTextual()) {
+                            String leafPem = leafPemNode.asText();
+                            Set<X509Certificate> tmp = new LinkedHashSet<>();
+                            // vorhandene Helfer wiederverwenden:
+                            parsePemCertificates(leafPem, cf, tmp, debug);
+                            if (!tmp.isEmpty()) {
+                                leafCert = tmp.iterator().next();
+                            }
+                        }
+
+                        // --- Kette auslesen --------------------
+                        List<X509Certificate> chainCerts = new ArrayList<>();
+                        JsonNode chainNode = dataNode.path("chain");
+                        if (chainNode.isArray()) {
+                            for (JsonNode cNode : chainNode) {
+                                if (!cNode.isTextual()) continue;
+                                String pem = cNode.asText();
+                                Set<X509Certificate> tmp = new LinkedHashSet<>();
+                                parsePemCertificates(pem, cf, tmp, debug);
+                                chainCerts.addAll(tmp);
+                            }
+                        }
+
+                        // --- Schlüssel-Infos aus Leaf ----------
+                        if (leafCert != null) {
+                            java.security.PublicKey pk = leafCert.getPublicKey();
+                            String keyAlg = (pk != null ? pk.getAlgorithm() : null);
+                            if (keyAlg != null) {
+                                keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
+                            }
+
+                            Integer bits = extractKeySizeBits(pk);
+                            if (bits != null && bits > 0) {
+                                keySizeCounts.merge(bits, 1L, Long::sum);
+                                if (isWeakKeyLength(keyAlg, bits)) {
+                                    weakKeyCount++;
+                                }
+                            }
+
+                            String sigAlg = leafCert.getSigAlgName();
+                            if (sigAlg != null && !sigAlg.isBlank()) {
+                                signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
+                                if (isWeakSignatureAlgorithm(sigAlg)) {
+                                    weakSignatureAlgoCount++;
+                                }
+                            }
+                        }
+
+                        // --- Chain-"Qualität" ------------------
+                        List<X509Certificate> fullChain = new ArrayList<>();
+                        if (leafCert != null) fullChain.add(leafCert);
+                        fullChain.addAll(chainCerts);
+
+                        if (!fullChain.isEmpty()) {
+                            int chainLen = fullChain.size();
+                            chainLengthCounts.merge(chainLen, 1L, Long::sum);
+
+                            boolean chainHasWeakSig = false;
+                            for (X509Certificate c : fullChain) {
+                                String sigAlg = c.getSigAlgName();
+                                if (sigAlg != null && isWeakSignatureAlgorithm(sigAlg)) {
+                                    chainHasWeakSig = true;
+                                    break;
+                                }
+                            }
+                            if (chainHasWeakSig) {
+                                chainsWithWeakSig++;
+                            }
+                        }
+                    }
+
                 } catch (Exception e) {
                     if (debug) {
                         System.err.println("[Analyzer] JSON-Parse-Fehler in Zeile " + lines + ": " + e.getMessage());
@@ -165,6 +280,66 @@ public class Analyzer {
             classification = "Kritische Vertrauenswürdigkeit";
         }
         System.out.println("Einstufung: " + classification);
+
+        System.out.println();
+        System.out.println("=== Technische TLS-Auswertung ===");
+
+// TLS-Versionen
+        System.out.println("TLS-Versionen (alle):");
+        tlsVersionCounts.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.printf("  %-10s %8d%n", e.getKey(), e.getValue()));
+
+        if (!deprecatedTlsVersionCounts.isEmpty()) {
+            System.out.println("Veraltete TLS-Versionen:");
+            deprecatedTlsVersionCounts.entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .forEach(e -> System.out.printf("  %-10s %8d%n", e.getKey(), e.getValue()));
+        }
+
+// Cipher-Suites
+        System.out.println();
+        System.out.println("Cipher-Suites (Top N):");
+        cipherSuiteCounts.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .limit(20)
+                .forEach(e -> System.out.printf("  %-50s %8d%n", e.getKey(), e.getValue()));
+
+        if (!weakCipherSuiteCounts.isEmpty()) {
+            System.out.println();
+            System.out.println("Schwache Cipher-Suites:");
+            weakCipherSuiteCounts.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                    .forEach(e -> System.out.printf("  %-50s %8d%n", e.getKey(), e.getValue()));
+        }
+
+// Schlüssel
+        System.out.println();
+        System.out.println("Public-Key-Algorithmen (Leaf):");
+        keyAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-10s %8d%n", alg, count));
+
+        System.out.println("Schlüssellängen (Leaf, Bits):");
+        keySizeCounts.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.printf("  %4d Bit %8d%n", e.getKey(), e.getValue()));
+        System.out.println("Davon mit schwacher Schlüssellänge: " + weakKeyCount);
+
+// Signaturalgorithmen
+        System.out.println();
+        System.out.println("Signaturalgorithmen (Leaf):");
+        signatureAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-20s %8d%n", alg, count));
+        System.out.println("Zertifikatsketten mit schwacher Signatur irgendwo in der Kette: "
+                + chainsWithWeakSig);
+
+// Chain-Qualität (sehr grob über Länge)
+        System.out.println();
+        System.out.println("Kettenlängen (inkl. Leaf):");
+        chainLengthCounts.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.printf("  Länge %2d: %8d%n", e.getKey(), e.getValue()));
+
     }
 
     /**
@@ -267,5 +442,59 @@ public class Analyzer {
         }
         return true;
     }
+
+    private boolean isDeprecatedTlsVersion(String raw) {
+        if (raw == null) return false;
+        String v = raw.toUpperCase(Locale.ROOT).replaceAll("\\s+", "");
+        // Mögliche Schreibweisen: "TLS1.0", "TLSv1.0", "TLS10", ...
+        return v.contains("SSL3") ||
+                v.contains("SSL2") ||
+                v.contains("TLS1.0") || v.contains("TLS10") ||
+                v.contains("TLS1.1") || v.contains("TLS11");
+    }
+
+    private boolean isWeakCipherSuite(String cipher) {
+        if (cipher == null) return false;
+        String c = cipher.toUpperCase(Locale.ROOT);
+        return c.contains("RC4")
+                || c.contains("3DES")
+                || c.contains(" DES_")  // DES ohne 3DES
+                || c.contains("NULL")   // keine Verschlüsselung
+                || c.contains("EXPORT")
+                || c.contains("MD5");
+    }
+
+    private Integer extractKeySizeBits(java.security.PublicKey pk) {
+        if (pk == null) return null;
+        if (pk instanceof java.security.interfaces.RSAPublicKey rsa) {
+            return rsa.getModulus().bitLength();
+        }
+        if (pk instanceof java.security.interfaces.ECPublicKey ec) {
+            return ec.getParams().getCurve().getField().getFieldSize();
+        }
+        if (pk instanceof java.security.interfaces.DSAPublicKey dsa) {
+            return dsa.getY().bitLength();
+        }
+        return null;
+    }
+
+    private boolean isWeakKeyLength(String algo, int bits) {
+        if (algo == null) return false;
+        String a = algo.toUpperCase(Locale.ROOT);
+        if (a.contains("RSA") || a.contains("DSA")) {
+            return bits < 2048;
+        }
+        if (a.contains("EC") || a.contains("ECDSA") || a.contains("ECDH")) {
+            return bits < 224; // konservativ, du kannst auch 256 ansetzen
+        }
+        return false;
+    }
+
+    private boolean isWeakSignatureAlgorithm(String sigAlg) {
+        if (sigAlg == null) return false;
+        String s = sigAlg.toUpperCase(Locale.ROOT);
+        return s.contains("MD5") || s.contains("SHA1");
+    }
+
 
 }

@@ -167,10 +167,6 @@ public class Main implements Callable<Integer> {
         adv.useZgrabOnly = true;                       // <- wichtig!
         adv.zgrabBinary = zgrabPath.toString();
 
-        // optional: GeoIP-Defaults, falls du Geo-Infos im Output haben willst
-        configureGeoIpDefaults(adv, true);
-        // ---------------------------------------------------------------
-
         ActiveScanner scanner = new ActiveScanner();
         try {
             scanner.scan(
@@ -359,7 +355,7 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    private static void configureGeoIpDefaults(ActiveScanner.AdvancedScanOptions adv, boolean log) {
+    private static void configureGeoIpDefaults(ActiveScanner.AdvancedScanOptions adv, boolean logWarnings) {
         Path geoipDir = projectRoot().resolve("GeoIP");
 
         // MMDBs
@@ -369,64 +365,57 @@ public class Main implements Callable<Integer> {
 
         if (Files.exists(defCountryDb)) {
             adv.geoipCountryDbPath = defCountryDb.toString();
-            if (log) System.out.println("[GeoIP-Country] lade: " + defCountryDb);
-        } else if (log) {
-            System.out.println("[GeoIP-Country] Achtung: Datei nicht gefunden: " + defCountryDb);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Warnung: Country-DB nicht gefunden: " + defCountryDb);
         }
 
         if (Files.exists(defAsnDb)) {
             adv.geoipAsnDbPath = defAsnDb.toString();
-            if (log) System.out.println("[GeoIP-ASN] lade: " + defAsnDb);
-        } else if (log) {
-            System.out.println("[GeoIP-ASN] Achtung: Datei nicht gefunden: " + defAsnDb);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Warnung: ASN-DB nicht gefunden: " + defAsnDb);
         }
 
         if (Files.exists(defCityDb)) {
             adv.geoipCityDbPath = defCityDb.toString();
-            if (log) System.out.println("[GeoIP-City] lade: " + defCityDb);
-        } else if (log) {
-            System.out.println("[GeoIP-City] Hinweis: City-DB nicht gefunden: " + defCityDb);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: City-DB nicht gefunden: " + defCityDb);
         }
 
-        // CSVs – genau wie im Bugfix oben
+        // CSVs – nur noch Warnungen, keine „lade ...“-Logs mehr
         Path countryBlocksCsv = geoipDir.resolve("GeoLite2-Country-Blocks-IPv4.csv");
         Path countryLocCsv    = geoipDir.resolve("GeoLite2-Country-Locations-en.csv");
         if (Files.exists(countryBlocksCsv)) {
             adv.countryBlocksCsvPath = countryBlocksCsv.toString();
-            if (log) System.out.println("[GeoIP-Country] Country-Blocks-CSV: " + countryBlocksCsv);
-        } else if (log) {
-            System.out.println("[GeoIP-Country] Hinweis: Country-Blocks-CSV nicht gefunden: " + countryBlocksCsv);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: Country-Blocks-CSV nicht gefunden: " + countryBlocksCsv);
         }
         if (Files.exists(countryLocCsv)) {
             adv.countryLocationsCsvPath = countryLocCsv.toString();
-            if (log) System.out.println("[GeoIP-Country] Country-Locations-CSV: " + countryLocCsv);
-        } else if (log) {
-            System.out.println("[GeoIP-Country] Hinweis: Country-Locations-CSV nicht gefunden: " + countryLocCsv);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: Country-Locations-CSV nicht gefunden: " + countryLocCsv);
         }
 
         Path asnBlocksCsv = geoipDir.resolve("GeoLite2-ASN-Blocks-IPv4.csv");
         if (Files.exists(asnBlocksCsv)) {
             adv.asnBlocksCsvPath = asnBlocksCsv.toString();
-            if (log) System.out.println("[GeoIP-ASN] ASN-Blocks-CSV: " + asnBlocksCsv);
-        } else if (log) {
-            System.out.println("[GeoIP-ASN] Hinweis: ASN-Blocks-CSV nicht gefunden: " + asnBlocksCsv);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: ASN-Blocks-CSV nicht gefunden: " + asnBlocksCsv);
         }
 
         Path cityBlocksCsv = geoipDir.resolve("GeoLite2-City-Blocks-IPv4.csv");
         Path cityLocCsv    = geoipDir.resolve("GeoLite2-City-Locations-en.csv");
         if (Files.exists(cityBlocksCsv)) {
             adv.cityBlocksCsvPath = cityBlocksCsv.toString();
-            if (log) System.out.println("[GeoIP-City] City-Blocks-CSV: " + cityBlocksCsv);
-        } else if (log) {
-            System.out.println("[GeoIP-City] Hinweis: City-Blocks-CSV nicht gefunden: " + cityBlocksCsv);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: City-Blocks-CSV nicht gefunden: " + cityBlocksCsv);
         }
         if (Files.exists(cityLocCsv)) {
             adv.cityLocationsCsvPath = cityLocCsv.toString();
-            if (log) System.out.println("[GeoIP-City] City-Locations-CSV: " + cityLocCsv);
-        } else if (log) {
-            System.out.println("[GeoIP-City] Hinweis: City-Locations-CSV nicht gefunden: " + cityLocCsv);
+        } else if (logWarnings) {
+            System.out.println("[GeoIP] Hinweis: City-Locations-CSV nicht gefunden: " + cityLocCsv);
         }
     }
+
 
 
     private static long readLong(Scanner in, String prompt, long defaultVal, long min, long max) {
