@@ -28,6 +28,10 @@ public class AnalyzeCommand implements Callable<Integer> {
             description = "Debug-Log aktivieren.")
     boolean debug;
 
+    @Option(names = {"-o", "--summary-output"},
+            description = "Pfad für JSON-Summary der Analyse (optional).")
+    Path summaryOutput;
+
     @Override
     public Integer call() throws Exception {
         Path inPath = resolveInputPath(input);
@@ -39,8 +43,9 @@ public class AnalyzeCommand implements Callable<Integer> {
         Analyzer analyzer = new Analyzer();
         analyzer.analyze(
                 inPath,
-                scoresFile,
-                debug
+                null,
+                debug,
+                summaryOutput
         );
 
         return 0;

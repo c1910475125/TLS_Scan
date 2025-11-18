@@ -253,9 +253,6 @@ public class Main implements Callable<Integer> {
             System.err.println("Fehler beim Länderscan: " + e.getMessage());
         }
     }
-
-    // --- 3) CT-Stream (wird im Menü nicht mehr verwendet, CLI nur noch intern) ------------
-
     // --- 5) Analyzer ----------------------------------------------------------------------
 
     private static void runAnalyzeInteractive(Scanner in) {
@@ -275,12 +272,39 @@ public class Main implements Callable<Integer> {
 
         boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
 
+        boolean saveSummary = readYesNo(in,
+                "Analyse-Ergebnis als JSON speichern? [y/N]",
+                false);
+        Path summaryOutput = null;
+        if (saveSummary) {
+            String timestamp = java.time.ZonedDateTime.now().format(
+                    java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+            );
+            String defaultName = "analysis" + timestamp + ".json";
+
+            String summaryName = promptFree(in,
+                    "Dateiname für Summary (ohne Pfad, .json wird automatisch ergänzt)",
+                    defaultName);
+
+            if (summaryName == null || summaryName.isBlank()) {
+                summaryName = defaultName;
+            }
+            summaryName = summaryName.trim();
+            if (!summaryName.toLowerCase(Locale.ROOT).endsWith(".json")) {
+                summaryName += ".json";
+            }
+
+            Path baseDir = (inPath.getParent() != null) ? inPath.getParent() : defaultScanDir();
+            summaryOutput = baseDir.resolve(summaryName);
+        }
+
         Analyzer analyzer = new Analyzer();
         try {
             analyzer.analyze(
                     inPath,
                     null,
-                    debug
+                    debug,
+                    summaryOutput
             );
         } catch (Exception e) {
             System.err.println("Fehler bei Analyse: " + e.getMessage());

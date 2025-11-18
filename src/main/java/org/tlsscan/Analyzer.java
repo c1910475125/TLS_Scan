@@ -2,6 +2,8 @@ package org.tlsscan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.tlsscan.RevocationUtil.RevocationStatus;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -12,10 +14,8 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
-import org.tlsscan.TlsCryptoUtil;
-import java.security.interfaces.RSAPublicKey;
-import java.security.interfaces.ECPublicKey;
-import java.security.interfaces.DSAPublicKey;
+
+import static org.tlsscan.RevocationUtil.checkRevocation;
 
 
 public class Analyzer {
@@ -24,7 +24,8 @@ public class Analyzer {
 
     public void analyze(Path inputJsonl,
                         String countryScoresPath,
-                        boolean debug) throws IOException {
+                        boolean debug,
+                        Path summaryOutput) throws IOException {
 
         final Map<String, Double> countryScores =
                 CountryTrustUtil.normalizeScores(
@@ -34,11 +35,27 @@ public class Analyzer {
         long lines = 0;
         long certs = 0;   // Anzahl bewerteter Zertifikate (max. 1 Root pro Zeile)
 
+// Revocation-Infos (Leaf)
+        long leafWithCrlDp = 0;
+        long leafWithOcspAia = 0;
+        long leafWithAnyRevocationInfo = 0;
+
+// SCT-Infos
+        long leafWithEmbeddedSct = 0;
+        long chainsWithAnySct = 0;
+
+// Rev-Infos
+        long revGood = 0;
+        long revRevoked = 0;
+        long revUnknown = 0;
+
+
         Map<String, Long> countByCountry = new HashMap<>();
         Map<String, Long> countByCountryForScore = new HashMap<>();
         Map<String, Double> scoreByCountry = new HashMap<>();
         Map<String, Long> tlsVersionCounts = new HashMap<>();
         Map<String, Long> deprecatedTlsVersionCounts = new HashMap<>();
+
 
         Map<String, Long> cipherSuiteCounts = new HashMap<>();
         Map<String, Long> weakCipherSuiteCounts = new HashMap<>();
@@ -120,6 +137,9 @@ public class Analyzer {
 
                         // --- Schlüssel-Infos aus Leaf ----------
                         if (leafCert != null) {
+                            boolean hasCrl  = hasCrlDistributionPoints(leafCert);
+                            boolean hasOcsp = hasAuthorityInfoAccessOcsp(leafCert);
+                            boolean hasSct  = hasEmbeddedSctExtension(leafCert);
                             java.security.PublicKey pk = leafCert.getPublicKey();
                             String keyAlg = (pk != null ? pk.getAlgorithm() : null);
                             if (keyAlg != null) {
@@ -141,6 +161,32 @@ public class Analyzer {
                                     weakSignatureAlgoCount++;
                                 }
                             }
+
+                            if (hasCrl) {
+                                leafWithCrlDp++;
+                            }
+                            if (hasOcsp) {
+                                leafWithOcspAia++;
+                            }
+                            if (hasCrl || hasOcsp) {
+                                leafWithAnyRevocationInfo++;
+                            }
+                            if (hasSct) {
+                                leafWithEmbeddedSct++;
+                            }
+
+                            RevocationStatus status = checkRevocation(
+                                    leafCert,
+                                    chainCerts,
+                                    debug
+                            );
+
+                            switch (status) {
+                                case GOOD -> revGood++;
+                                case REVOKED -> revRevoked++;
+                                case UNKNOWN -> revUnknown++;
+                            }
+
                         }
 
                         // --- Chain-"Qualität" ------------------
@@ -155,7 +201,7 @@ public class Analyzer {
                             boolean chainHasWeakSig = false;
                             for (X509Certificate c : fullChain) {
                                 String sigAlg = c.getSigAlgName();
-                                if (sigAlg != null && TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
+                                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
                                     chainHasWeakSig = true;
                                     break;
                                 }
@@ -176,7 +222,44 @@ public class Analyzer {
                 Set<X509Certificate> certsInLine = new HashSet<>();
                 extractCertificatesRecursive(root, cf, certsInLine, debug);
                 if (certsInLine.isEmpty()) continue;
+                certs++;
 
+                // Leaf-Zertifikat (für Revocation/SCT) bestimmen
+                X509Certificate leaf = chooseLeafCertificate(certsInLine);
+
+                // SCT in der gesamten Kette vorhanden?
+                boolean chainHasSct = false;
+                for (X509Certificate c : certsInLine) {
+                    if (hasEmbeddedSctExtension(c)) {
+                        chainHasSct = true;
+                        break;
+                    }
+                }
+                if (chainHasSct) {
+                    chainsWithAnySct++;
+                }
+
+                // Revocation-Infos & SCT nur am Leaf auswerten
+                if (leaf != null) {
+                    boolean hasCrl = hasCrlDistributionPoints(leaf);
+                    boolean hasOcsp = hasAuthorityInfoAccessOcsp(leaf);
+                    boolean hasSct = hasEmbeddedSctExtension(leaf);
+
+                    if (hasCrl) {
+                        leafWithCrlDp++;
+                    }
+                    if (hasOcsp) {
+                        leafWithOcspAia++;
+                    }
+                    if (hasCrl || hasOcsp) {
+                        leafWithAnyRevocationInfo++;
+                    }
+                    if (hasSct) {
+                        leafWithEmbeddedSct++;
+                    }
+                }
+
+                // Root-/CA-Land für TrustScore-Bewertung bestimmen
                 X509Certificate selected = chooseRootCertificate(certsInLine);
                 if (selected == null) continue;
 
@@ -188,6 +271,7 @@ public class Analyzer {
                         countByCountryForScore,
                         countryScores
                 );
+
 
             }
         }
@@ -322,10 +406,36 @@ public class Analyzer {
 
 // Chain-Qualität (sehr grob über Länge)
         System.out.println();
-        System.out.println("Kettenlängen (inkl. Leaf):");
-        chainLengthCounts.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(e -> System.out.printf("  Länge %2d: %8d%n", e.getKey(), e.getValue()));
+        System.out.println("=== Revocation & SCT ===");
+        System.out.printf("Leaf-Zertifikate mit CRL-DP:   %d%n", leafWithCrlDp);
+        System.out.printf("Leaf-Zertifikate mit OCSP-AIA: %d%n", leafWithOcspAia);
+        System.out.printf("Leafs mit Revocation-Info:     %d%n", leafWithAnyRevocationInfo);
+        System.out.printf("Leafs mit SCT-Extension:       %d%n", leafWithEmbeddedSct);
+        System.out.printf("Ketten mit SCT-Extension:      %d%n", chainsWithAnySct);
+
+        System.out.println();
+        System.out.println("=== Revocation-Status (online geprüft) ===");
+        System.out.printf("GOOD    : %d%n", revGood);
+        System.out.printf("REVOKED : %d%n", revRevoked);
+        System.out.printf("UNKNOWN : %d%n", revUnknown);
+
+
+        if (summaryOutput != null) {
+            writeSummaryJson(summaryOutput,
+                    inputJsonl,
+                    lines,
+                    certs,
+                    countByCountry,
+                    scoreByCountry,
+                    leafWithCrlDp,
+                    leafWithOcspAia,
+                    leafWithAnyRevocationInfo,
+                    leafWithEmbeddedSct,
+                    chainsWithAnySct,
+                    revGood,
+                    revRevoked,
+                    revUnknown);
+        }
 
     }
 
@@ -430,5 +540,105 @@ public class Analyzer {
         return true;
     }
 
+    private X509Certificate chooseLeafCertificate(Set<X509Certificate> certsInLine) {
+        if (certsInLine == null || certsInLine.isEmpty()) return null;
+        if (certsInLine.size() == 1) return certsInLine.iterator().next();
+
+        for (X509Certificate candidate : certsInLine) {
+            boolean hasChild = false;
+            for (X509Certificate other : certsInLine) {
+                if (candidate == other) continue;
+                if (candidate.getSubjectX500Principal().equals(other.getIssuerX500Principal())) {
+                    hasChild = true;
+                    break;
+                }
+            }
+            if (!hasChild) {
+                // Kandidat, der nichts mehr "darunter" hat -> Leaf
+                return candidate;
+            }
+        }
+        // Fallback
+        return certsInLine.iterator().next();
+    }
+
+    private boolean hasCrlDistributionPoints(X509Certificate cert) {
+        // OID: 2.5.29.31
+        return cert.getExtensionValue("2.5.29.31") != null;
+    }
+
+    private boolean hasAuthorityInfoAccessOcsp(X509Certificate cert) {
+        // OID AIA: 1.3.6.1.5.5.7.1.1
+        byte[] ext = cert.getExtensionValue("1.3.6.1.5.5.7.1.1");
+        if (ext == null) {
+            return false;
+        }
+        // Grobe Heuristik: nach "ocsp" im dekodierten Bytearray suchen.
+        String text = new String(ext, StandardCharsets.ISO_8859_1);
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("ocsp");
+    }
+
+    private boolean hasEmbeddedSctExtension(X509Certificate cert) {
+        // OID Embedded SCT: 1.3.6.1.4.1.11129.2.4.2
+        return cert.getExtensionValue("1.3.6.1.4.1.11129.2.4.2") != null;
+    }
+
+    private void writeSummaryJson(
+            Path summaryOutput,
+            Path inputJsonl,
+            long lines,
+            long certs,
+            Map<String, Long> countByCountry,
+            Map<String, Double> scoreByCountry,
+            long leafWithCrlDp,
+            long leafWithOcspAia,
+            long leafWithAnyRevocationInfo,
+            long leafWithEmbeddedSct,
+            long chainsWithAnySct,
+            long revGood,
+            long revRevoked,
+            long revUnknown
+    ) {
+        try {
+            ObjectNode root = mapper.createObjectNode();
+            root.put("input_file", inputJsonl.toString());
+            root.put("lines", lines);
+            root.put("cert_chains", certs);
+
+            ObjectNode countryNode = root.putObject("root_ca_country");
+            ObjectNode countsNode = countryNode.putObject("counts");
+            for (Map.Entry<String, Long> e : countByCountry.entrySet()) {
+                countsNode.put(e.getKey(), e.getValue());
+            }
+            ObjectNode scoresNode = countryNode.putObject("scores");
+            for (Map.Entry<String, Double> e : scoreByCountry.entrySet()) {
+                scoresNode.put(e.getKey(), e.getValue());
+            }
+
+            ObjectNode revNode = root.putObject("revocation");
+            revNode.put("leaf_with_crl_dp", leafWithCrlDp);
+            revNode.put("leaf_with_ocsp_aia", leafWithOcspAia);
+            revNode.put("leaf_with_any_revocation_info", leafWithAnyRevocationInfo);
+            revNode.put("leaf_with_sct_extension", leafWithEmbeddedSct);
+            revNode.put("chains_with_sct_extension", chainsWithAnySct);
+            revNode.put("status_good", revGood);
+            revNode.put("status_revoked", revRevoked);
+            revNode.put("status_unknown", revUnknown);
+
+            if (summaryOutput.getParent() != null) {
+                Files.createDirectories(summaryOutput.getParent());
+            }
+            mapper.writerWithDefaultPrettyPrinter()
+                    .writeValue(summaryOutput.toFile(), root);
+
+            System.out.println("Analyse-Summary gespeichert in: " + summaryOutput);
+        } catch (IOException e) {
+            System.err.println("Konnte Analyse-Summary nicht schreiben: " + e.getMessage());
+        }
+    }
+
 
 }
+
+
