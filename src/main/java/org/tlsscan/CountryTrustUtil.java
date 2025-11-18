@@ -10,6 +10,9 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.security.cert.X509Certificate;
+import java.util.Map;
+
 
 /**
  * Gemeinsame Hilfsfunktionen für:
@@ -88,4 +91,57 @@ public final class CountryTrustUtil {
         }
         return out;
     }
+
+    /**
+     * Bestimmt den "Country-Key" für ein Zertifikat:
+     *  - bevorzugt Subject-Country, sonst Issuer-Country
+     *  - normalisiert auf Großbuchstaben
+     *  - "??" falls nichts gefunden wird
+     */
+    public static String determineCountryKeyFromCert(X509Certificate cert) {
+        if (cert == null) {
+            return "??";
+        }
+
+        String issuerCountry = extractCountryFromDn(
+                cert.getIssuerX500Principal().getName()
+        );
+        String subjectCountry = extractCountryFromDn(
+                cert.getSubjectX500Principal().getName()
+        );
+
+        String rawCountry = (subjectCountry != null && !subjectCountry.isBlank())
+                ? subjectCountry
+                : issuerCountry;
+
+        if (rawCountry == null || rawCountry.isBlank()) {
+            return "??";
+        }
+        return rawCountry.toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * Aktualisiert die Länder-Zähler für ein Zertifikat:
+     *  - countByCountry: alle Zertifikate nach Country-Key
+     *  - countByCountryForScore: nur, wenn ein Score im countryScores-Map existiert
+     */
+    public static void updateCountryCountersForCert(
+            X509Certificate cert,
+            Map<String, Long> countByCountry,
+            Map<String, Long> countByCountryForScore,
+            Map<String, Double> countryScores
+    ) {
+        if (countByCountry == null || countByCountryForScore == null || countryScores == null) {
+            return;
+        }
+
+        String countryKey = determineCountryKeyFromCert(cert);
+        countByCountry.merge(countryKey, 1L, Long::sum);
+
+        if (!"??".equals(countryKey) && countryScores.containsKey(countryKey)) {
+            countByCountryForScore.merge(countryKey, 1L, Long::sum);
+        }
+    }
+
+
 }

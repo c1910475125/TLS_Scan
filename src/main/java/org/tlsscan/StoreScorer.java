@@ -13,6 +13,10 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.Base64;
+import java.security.interfaces.RSAPublicKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.interfaces.DSAPublicKey;
+
 
 public class StoreScorer {
 
@@ -159,32 +163,53 @@ public class StoreScorer {
 
         long totalCerts = 0;
 
+        Map<String, Long> keyAlgorithmCounts = new HashMap<>();
+        Map<Integer, Long> keySizeCounts = new HashMap<>();
+        long weakKeyCount = 0L;
+
+        Map<String, Long> signatureAlgorithmCounts = new HashMap<>();
+        long weakSignatureAlgoCount = 0L;
+
+        Map<String, Long> basicConstraintsCounts = new HashMap<>();
+
         for (X509Certificate cert : certs) {
             totalCerts++;
 
-            String issuerCountry = CountryTrustUtil.extractCountryFromDn(
-                    cert.getIssuerX500Principal().getName()
-            );
-            String subjectCountry = CountryTrustUtil.extractCountryFromDn(
-                    cert.getSubjectX500Principal().getName()
-            );
-
-            String rawCountry = issuerCountry != null ? issuerCountry : subjectCountry;
-
-            String countryKey;
-            if (rawCountry == null || rawCountry.isBlank()) {
-                countryKey = "??";
-            } else {
-                countryKey = rawCountry.toUpperCase(Locale.ROOT);
+            java.security.PublicKey pk = cert.getPublicKey();
+            String keyAlg = (pk != null ? pk.getAlgorithm() : null);
+            if (keyAlg != null) {
+                keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
             }
 
-            // Statistik: alle Länder zählen
-            countByCountry.merge(countryKey, 1L, Long::sum);
-
-            // Für Score-Berechnung: nur bekannte Länder mit Trustscore berücksichtigen
-            if (!"??".equals(countryKey) && countryScores.containsKey(countryKey)) {
-                countByCountryForScore.merge(countryKey, 1L, Long::sum);
+            Integer bits = TlsCryptoUtil.extractKeySizeBits(pk);
+            if (bits != null && bits > 0) {
+                keySizeCounts.merge(bits, 1L, Long::sum);
+                if (TlsCryptoUtil.isWeakKeyLength(keyAlg, bits)) {
+                    weakKeyCount++;
+                }
             }
+
+            String sigAlg = cert.getSigAlgName();
+            if (sigAlg != null && !sigAlg.isBlank()) {
+                signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
+                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
+                    weakSignatureAlgoCount++;
+                }
+            }
+
+            // BasicConstraints: ist das überhaupt ein CA-Zertifikat?
+            int bc = cert.getBasicConstraints();
+            String bcKey = (bc >= 0) ? "CA" : "EndEntity/Unknown";
+            basicConstraintsCounts.merge(bcKey, 1L, Long::sum);
+
+            CountryTrustUtil.updateCountryCountersForCert(
+                    cert,
+                    countByCountry,
+                    countByCountryForScore,
+                    countryScores
+            );
+
+
         }
 
         // Gewichtete Länderbeiträge berechnen
@@ -215,6 +240,33 @@ public class StoreScorer {
                 countryScores,
                 scoreByCountry
         );
+
+        System.out.println();
+        System.out.println("=== Technische Bewertung des Stores ===");
+
+        System.out.println("Public-Key-Algorithmen:");
+        keyAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-12s %8d%n", alg, count));
+
+        System.out.println();
+        System.out.println("Schlüssellängen (Bits):");
+        keySizeCounts.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.printf("  %4d Bit %8d%n", e.getKey(), e.getValue()));
+        System.out.println("Davon mit schwacher Schlüssellänge: " + weakKeyCount);
+
+        System.out.println();
+        System.out.println("Signaturalgorithmen:");
+        signatureAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-20s %8d%n", alg, count));
+        System.out.println("Zertifikate mit schwachem Signaturalgorithmus (MD5/SHA1): "
+                + weakSignatureAlgoCount);
+
+        System.out.println();
+        System.out.println("Basic Constraints (CA vs. End-Entity):");
+        basicConstraintsCounts.forEach((k, v) ->
+                System.out.printf("  %-16s %8d%n", k, v));
+        System.out.println("====================================================================");
     }
 
     // --- Ausgabelogik --------------------------------------------------------------------

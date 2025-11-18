@@ -12,6 +12,7 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
+import org.tlsscan.TlsCryptoUtil;
 import java.security.interfaces.RSAPublicKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.DSAPublicKey;
@@ -77,7 +78,7 @@ public class Analyzer {
                         String tlsVersion = dataNode.path("tls_version").asText(null);
                         if (tlsVersion != null && !tlsVersion.isBlank()) {
                             tlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
-                            if (isDeprecatedTlsVersion(tlsVersion)) {
+                            if (TlsCryptoUtil.isDeprecatedTlsVersion(tlsVersion)) {
                                 deprecatedTlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
                             }
                         }
@@ -86,7 +87,7 @@ public class Analyzer {
                         String cipherSuite = dataNode.path("cipher_suite").asText(null);
                         if (cipherSuite != null && !cipherSuite.isBlank()) {
                             cipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
-                            if (isWeakCipherSuite(cipherSuite)) {
+                            if (TlsCryptoUtil.isWeakCipherSuite(cipherSuite)) {
                                 weakCipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
                             }
                         }
@@ -125,10 +126,10 @@ public class Analyzer {
                                 keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
                             }
 
-                            Integer bits = extractKeySizeBits(pk);
+                            Integer bits = TlsCryptoUtil.extractKeySizeBits(pk);
                             if (bits != null && bits > 0) {
                                 keySizeCounts.merge(bits, 1L, Long::sum);
-                                if (isWeakKeyLength(keyAlg, bits)) {
+                                if (TlsCryptoUtil.isWeakKeyLength(keyAlg, bits)) {
                                     weakKeyCount++;
                                 }
                             }
@@ -136,7 +137,7 @@ public class Analyzer {
                             String sigAlg = leafCert.getSigAlgName();
                             if (sigAlg != null && !sigAlg.isBlank()) {
                                 signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
-                                if (isWeakSignatureAlgorithm(sigAlg)) {
+                                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
                                     weakSignatureAlgoCount++;
                                 }
                             }
@@ -154,7 +155,7 @@ public class Analyzer {
                             boolean chainHasWeakSig = false;
                             for (X509Certificate c : fullChain) {
                                 String sigAlg = c.getSigAlgName();
-                                if (sigAlg != null && isWeakSignatureAlgorithm(sigAlg)) {
+                                if (sigAlg != null && TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
                                     chainHasWeakSig = true;
                                     break;
                                 }
@@ -181,27 +182,13 @@ public class Analyzer {
 
                 certs++;
 
-                String issuerCountry = CountryTrustUtil.extractCountryFromDn(
-                        selected.getIssuerX500Principal().getName()
+                CountryTrustUtil.updateCountryCountersForCert(
+                        selected,
+                        countByCountry,
+                        countByCountryForScore,
+                        countryScores
                 );
-                String subjectCountry = CountryTrustUtil.extractCountryFromDn(
-                        selected.getSubjectX500Principal().getName()
-                );
 
-                String rawCountry = subjectCountry != null ? subjectCountry : issuerCountry;
-
-                String countryKey;
-                if (rawCountry == null || rawCountry.isBlank()) {
-                    countryKey = "??";
-                } else {
-                    countryKey = rawCountry.toUpperCase(Locale.ROOT);
-                }
-
-                countByCountry.merge(countryKey, 1L, Long::sum);
-
-                if (!"??".equals(countryKey) && countryScores.containsKey(countryKey)) {
-                    countByCountryForScore.merge(countryKey, 1L, Long::sum);
-                }
             }
         }
 
@@ -441,59 +428,6 @@ public class Analyzer {
             }
         }
         return true;
-    }
-
-    private boolean isDeprecatedTlsVersion(String raw) {
-        if (raw == null) return false;
-        String v = raw.toUpperCase(Locale.ROOT).replaceAll("\\s+", "");
-        // Mögliche Schreibweisen: "TLS1.0", "TLSv1.0", "TLS10", ...
-        return v.contains("SSL3") ||
-                v.contains("SSL2") ||
-                v.contains("TLS1.0") || v.contains("TLS10") ||
-                v.contains("TLS1.1") || v.contains("TLS11");
-    }
-
-    private boolean isWeakCipherSuite(String cipher) {
-        if (cipher == null) return false;
-        String c = cipher.toUpperCase(Locale.ROOT);
-        return c.contains("RC4")
-                || c.contains("3DES")
-                || c.contains(" DES_")  // DES ohne 3DES
-                || c.contains("NULL")   // keine Verschlüsselung
-                || c.contains("EXPORT")
-                || c.contains("MD5");
-    }
-
-    private Integer extractKeySizeBits(java.security.PublicKey pk) {
-        if (pk == null) return null;
-        if (pk instanceof java.security.interfaces.RSAPublicKey rsa) {
-            return rsa.getModulus().bitLength();
-        }
-        if (pk instanceof java.security.interfaces.ECPublicKey ec) {
-            return ec.getParams().getCurve().getField().getFieldSize();
-        }
-        if (pk instanceof java.security.interfaces.DSAPublicKey dsa) {
-            return dsa.getY().bitLength();
-        }
-        return null;
-    }
-
-    private boolean isWeakKeyLength(String algo, int bits) {
-        if (algo == null) return false;
-        String a = algo.toUpperCase(Locale.ROOT);
-        if (a.contains("RSA") || a.contains("DSA")) {
-            return bits < 2048;
-        }
-        if (a.contains("EC") || a.contains("ECDSA") || a.contains("ECDH")) {
-            return bits < 224; // konservativ, du kannst auch 256 ansetzen
-        }
-        return false;
-    }
-
-    private boolean isWeakSignatureAlgorithm(String sigAlg) {
-        if (sigAlg == null) return false;
-        String s = sigAlg.toUpperCase(Locale.ROOT);
-        return s.contains("MD5") || s.contains("SHA1");
     }
 
 
