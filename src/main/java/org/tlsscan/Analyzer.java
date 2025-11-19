@@ -95,7 +95,7 @@ public class Analyzer {
                         String tlsVersion = dataNode.path("tls_version").asText(null);
                         if (tlsVersion != null && !tlsVersion.isBlank()) {
                             tlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
-                            if (TlsCryptoUtil.isDeprecatedTlsVersion(tlsVersion)) {
+                            if (Util.isDeprecatedTlsVersion(tlsVersion)) {
                                 deprecatedTlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
                             }
                         }
@@ -104,7 +104,7 @@ public class Analyzer {
                         String cipherSuite = dataNode.path("cipher_suite").asText(null);
                         if (cipherSuite != null && !cipherSuite.isBlank()) {
                             cipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
-                            if (TlsCryptoUtil.isWeakCipherSuite(cipherSuite)) {
+                            if (Util.isWeakCipherSuite(cipherSuite)) {
                                 weakCipherSuiteCounts.merge(cipherSuite, 1L, Long::sum);
                             }
                         }
@@ -146,10 +146,10 @@ public class Analyzer {
                                 keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
                             }
 
-                            Integer bits = TlsCryptoUtil.extractKeySizeBits(pk);
+                            Integer bits = Util.extractKeySizeBits(pk);
                             if (bits != null && bits > 0) {
                                 keySizeCounts.merge(bits, 1L, Long::sum);
-                                if (TlsCryptoUtil.isWeakKeyLength(keyAlg, bits)) {
+                                if (Util.isWeakKeyLength(keyAlg, bits)) {
                                     weakKeyCount++;
                                 }
                             }
@@ -157,7 +157,7 @@ public class Analyzer {
                             String sigAlg = leafCert.getSigAlgName();
                             if (sigAlg != null && !sigAlg.isBlank()) {
                                 signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
-                                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
+                                if (Util.isWeakSignatureAlgorithm(sigAlg)) {
                                     weakSignatureAlgoCount++;
                                 }
                             }
@@ -201,7 +201,7 @@ public class Analyzer {
                             boolean chainHasWeakSig = false;
                             for (X509Certificate c : fullChain) {
                                 String sigAlg = c.getSigAlgName();
-                                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
+                                if (Util.isWeakSignatureAlgorithm(sigAlg)) {
                                     chainHasWeakSig = true;
                                     break;
                                 }

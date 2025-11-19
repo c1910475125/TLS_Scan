@@ -1,5 +1,8 @@
 package org.tlsscan;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,12 +16,11 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.Base64;
-import java.security.interfaces.RSAPublicKey;
-import java.security.interfaces.ECPublicKey;
-import java.security.interfaces.DSAPublicKey;
 
 
 public class StoreScorer {
+
+    private final ObjectMapper mapper = new ObjectMapper();
 
     /**
      * Auto-Erkennung:
@@ -30,9 +32,10 @@ public class StoreScorer {
     public void scoreStoreAuto(Path storePath,
                                char[] passwordIgnored,
                                String countryScoresPath,
+                               Path summaryOutput,
                                boolean debug) throws Exception {
         if (looksLikePemFile(storePath)) {
-            scorePemBundle(storePath, countryScoresPath, debug);
+            scorePemBundle(storePath, countryScoresPath, summaryOutput,debug);
         } else {
             throw new IllegalArgumentException(
                     "Datei sieht nicht wie ein PEM-Zertifikatsbundle aus (kein '-----BEGIN CERTIFICATE-----' gefunden)."
@@ -46,8 +49,8 @@ public class StoreScorer {
      */
     public void scoreStore(Path storePath,
                            char[] password,
-                           String countryScoresPath) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, false);
+                           String countryScoresPath, Path summaryOutput) throws Exception {
+        scoreKeystore(storePath, password, countryScoresPath, summaryOutput,false);
     }
 
     /**
@@ -56,6 +59,7 @@ public class StoreScorer {
     public void scoreKeystore(Path storePath,
                               char[] password,
                               String countryScoresPath,
+                              Path summaryOutput,
                               boolean debug) throws Exception {
 
         KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
@@ -81,6 +85,7 @@ public class StoreScorer {
                 "Java Keystore",
                 storePath,
                 countryScoresPath,
+                summaryOutput,
                 debug
         );
     }
@@ -91,6 +96,7 @@ public class StoreScorer {
      */
     public void scorePemBundle(Path pemPath,
                                String countryScoresPath,
+                               Path summaryOutput,
                                boolean debug) throws Exception {
 
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
@@ -133,6 +139,7 @@ public class StoreScorer {
                 "PEM-Bundle",
                 pemPath,
                 countryScoresPath,
+                summaryOutput,
                 debug
         );
     }
@@ -149,7 +156,7 @@ public class StoreScorer {
     private void scoreCertificates(Collection<X509Certificate> certs,
                                    String storeType,
                                    Path storePath,
-                                   String countryScoresPath,
+                                   String countryScoresPath, Path summaryOutput,
                                    boolean debug) throws IOException {
 
         Map<String, Double> countryScores =
@@ -181,10 +188,10 @@ public class StoreScorer {
                 keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
             }
 
-            Integer bits = TlsCryptoUtil.extractKeySizeBits(pk);
+            Integer bits = Util.extractKeySizeBits(pk);
             if (bits != null && bits > 0) {
                 keySizeCounts.merge(bits, 1L, Long::sum);
-                if (TlsCryptoUtil.isWeakKeyLength(keyAlg, bits)) {
+                if (Util.isWeakKeyLength(keyAlg, bits)) {
                     weakKeyCount++;
                 }
             }
@@ -192,7 +199,7 @@ public class StoreScorer {
             String sigAlg = cert.getSigAlgName();
             if (sigAlg != null && !sigAlg.isBlank()) {
                 signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
-                if (TlsCryptoUtil.isWeakSignatureAlgorithm(sigAlg)) {
+                if (Util.isWeakSignatureAlgorithm(sigAlg)) {
                     weakSignatureAlgoCount++;
                 }
             }
@@ -232,54 +239,8 @@ public class StoreScorer {
             }
         }
 
-        printStoreResult(
-                storeType,
-                storePath,
-                totalCerts,
-                countByCountry,
-                countryScores,
-                scoreByCountry
-        );
-
-        System.out.println();
-        System.out.println("=== Technische Bewertung des Stores ===");
-
-        System.out.println("Public-Key-Algorithmen:");
-        keyAlgorithmCounts.forEach((alg, count) ->
-                System.out.printf("  %-12s %8d%n", alg, count));
-
-        System.out.println();
-        System.out.println("Schlüssellängen (Bits):");
-        keySizeCounts.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(e -> System.out.printf("  %4d Bit %8d%n", e.getKey(), e.getValue()));
-        System.out.println("Davon mit schwacher Schlüssellänge: " + weakKeyCount);
-
-        System.out.println();
-        System.out.println("Signaturalgorithmen:");
-        signatureAlgorithmCounts.forEach((alg, count) ->
-                System.out.printf("  %-20s %8d%n", alg, count));
-        System.out.println("Zertifikate mit schwachem Signaturalgorithmus (MD5/SHA1): "
-                + weakSignatureAlgoCount);
-
-        System.out.println();
-        System.out.println("Basic Constraints (CA vs. End-Entity):");
-        basicConstraintsCounts.forEach((k, v) ->
-                System.out.printf("  %-16s %8d%n", k, v));
-        System.out.println("====================================================================");
-    }
-
-    // --- Ausgabelogik --------------------------------------------------------------------
-
-    private void printStoreResult(String storeType,
-                                  Path path,
-                                  long totalCerts,
-                                  Map<String, Long> countByCountry,
-                                  Map<String, Double> countryScores,
-                                  Map<String, Double> scoreByCountry) {
-
         System.out.println("Storetyp : " + storeType);
-        System.out.println("Datei    : " + path);
+        System.out.println("Datei    : " + storePath);
         System.out.println("Zertifikate im Store: " + totalCerts);
 
         System.out.println();
@@ -332,6 +293,43 @@ public class StoreScorer {
             classification = "Kritische Vertrauenswürdigkeit";
         }
         System.out.println("Einstufung: " + classification);
+
+        System.out.println();
+        System.out.println("=== Technische Bewertung des Stores ===");
+
+        System.out.println("Public-Key-Algorithmen:");
+        keyAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-12s %8d%n", alg, count));
+
+        System.out.println();
+        System.out.println("Schlüssellängen (Bits):");
+        keySizeCounts.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.printf("  %4d Bit %8d%n", e.getKey(), e.getValue()));
+        System.out.println("Davon mit schwacher Schlüssellänge: " + weakKeyCount);
+
+        System.out.println();
+        System.out.println("Signaturalgorithmen:");
+        signatureAlgorithmCounts.forEach((alg, count) ->
+                System.out.printf("  %-20s %8d%n", alg, count));
+        System.out.println("Zertifikate mit schwachem Signaturalgorithmus (MD5/SHA1): "
+                + weakSignatureAlgoCount);
+
+        System.out.println();
+        System.out.println("Basic Constraints (CA vs. End-Entity):");
+        basicConstraintsCounts.forEach((k, v) ->
+                System.out.printf("  %-16s %8d%n", k, v));
+        System.out.println("====================================================================");
+
+        if (summaryOutput != null) {
+            writeSummaryJson(summaryOutput,
+                    storePath,
+                    totalCerts,
+                    totalScore,
+                    countByCountry,
+                    scoreByCountry);
+        }
+
     }
 
     // --- Hilfsfunktionen ------------------------------------------------------------------
@@ -350,6 +348,42 @@ public class StoreScorer {
             // wenn nicht lesbar, ist es für uns sowieso kein gültiges PEM
         }
         return false;
+    }
+
+    private void writeSummaryJson(
+            Path summaryOutput,
+            Path inputJsonl,
+            long lines,
+            double totalscore,
+            Map<String, Long> countByCountry,
+            Map<String, Double> scoreByCountry
+    ) {
+        try {
+            ObjectNode root = mapper.createObjectNode();
+            root.put("input_file", inputJsonl.toString());
+            root.put("lines", lines);
+            ObjectNode countryNode = root.putObject("root_ca_country");
+            ObjectNode countsNode = countryNode.putObject("counts");
+            for (Map.Entry<String, Long> e : countByCountry.entrySet()) {
+                countsNode.put(e.getKey(), e.getValue());
+            }
+            ObjectNode scoresNode = countryNode.putObject("scores");
+            for (Map.Entry<String, Double> e : scoreByCountry.entrySet()) {
+                scoresNode.put(e.getKey(), e.getValue());
+            }
+
+            root.put("Total trustscore:", totalscore);
+
+            if (summaryOutput.getParent() != null) {
+                Files.createDirectories(summaryOutput.getParent());
+            }
+            mapper.writerWithDefaultPrettyPrinter()
+                    .writeValue(summaryOutput.toFile(), root);
+
+            System.out.println("Analyse-Summary gespeichert in: " + summaryOutput);
+        } catch (IOException e) {
+            System.err.println("Konnte Analyse-Summary nicht schreiben: " + e.getMessage());
+        }
     }
 
 }

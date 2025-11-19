@@ -6,9 +6,9 @@ import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Locale;
 
-public final class TlsCryptoUtil {
+public final class Util {
 
-    private TlsCryptoUtil() {
+    private Util() {
         // Utility-Klasse, keine Instanz
     }
 
@@ -95,4 +95,6 @@ public final class TlsCryptoUtil {
         String s = sigAlg.toUpperCase(Locale.ROOT);
         return s.contains("MD5") || s.contains("SHA1");
     }
+
+
 }
