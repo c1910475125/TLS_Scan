@@ -425,6 +425,7 @@ public class Analyzer {
                     inputJsonl,
                     lines,
                     certs,
+                    totalScore,
                     countByCountry,
                     scoreByCountry,
                     leafWithCrlDp,
@@ -589,6 +590,7 @@ public class Analyzer {
             Path inputJsonl,
             long lines,
             long certs,
+            double totalscore,
             Map<String, Long> countByCountry,
             Map<String, Double> scoreByCountry,
             long leafWithCrlDp,
@@ -615,6 +617,8 @@ public class Analyzer {
             for (Map.Entry<String, Double> e : scoreByCountry.entrySet()) {
                 scoresNode.put(e.getKey(), e.getValue());
             }
+
+            root.put("Total trustscore:", totalscore);
 
             ObjectNode revNode = root.putObject("revocation");
             revNode.put("leaf_with_crl_dp", leafWithCrlDp);
