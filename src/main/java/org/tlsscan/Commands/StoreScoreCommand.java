@@ -33,6 +33,10 @@ public class StoreScoreCommand implements Callable<Integer> {
             description = "Pfad für JSON-Summary der Analyse (optional).")
     Path summaryOutput;
 
+    @Option(names = {"-j", "--json-output"},
+            description = "Pfad für detailliertes JSON-Log (optional, JSONL-Format).")
+    Path jsonOutput;
+
     @Override
     public Integer call() throws Exception {
         Path storePath = resolveRootStorePath(keystorePath);
@@ -46,7 +50,8 @@ public class StoreScoreCommand implements Callable<Integer> {
                 storePath,
                 password.toCharArray(),
                 scoresFile,
-                summaryOutput
+                summaryOutput,
+                jsonOutput
         );
         return 0;
     }
