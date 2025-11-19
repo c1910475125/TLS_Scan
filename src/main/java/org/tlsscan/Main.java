@@ -319,21 +319,52 @@ public class Main implements Callable<Integer> {
                 "Pfad zum CA-Bundle (PEM, z.B. cacert.pem von Mozilla/Google)",
                 "cacert.pem");
 
-        Path storePath = Paths.get(storePathStr);
-        if (!Files.exists(storePath)) {
-            System.err.println("Datei existiert nicht: " + storePath);
+        Path inPath = Paths.get(storePathStr);
+        if (!inPath.isAbsolute()) {
+            inPath = defaultScanDir().resolve(storePathStr);
+        }
+
+        if (!Files.exists(inPath)) {
+            System.err.println("Datei existiert nicht: " + inPath);
             return;
         }
 
         boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
 
+        boolean saveSummary = readYesNo(in,
+                "Analyse-Ergebnis als JSON speichern? [y/N]",
+                false);
+        Path summaryOutput = null;
+        if (saveSummary) {
+            String timestamp = java.time.ZonedDateTime.now().format(
+                    java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+            );
+            String defaultName = "analysis" + timestamp + ".json";
+
+            String summaryName = promptFree(in,
+                    "Dateiname für Summary (ohne Pfad, .json wird automatisch ergänzt)",
+                    defaultName);
+
+            if (summaryName == null || summaryName.isBlank()) {
+                summaryName = defaultName;
+            }
+            summaryName = summaryName.trim();
+            if (!summaryName.toLowerCase(Locale.ROOT).endsWith(".json")) {
+                summaryName += ".json";
+            }
+
+            Path baseDir = (inPath.getParent() != null) ? inPath.getParent() : defaultScanDir();
+            summaryOutput = baseDir.resolve(summaryName);
+        }
+
         StoreScorer scorer = new StoreScorer();
         try {
             // Passwort ist für PEM egal, wird von scoreStoreAuto ignoriert
             scorer.scoreStoreAuto(
-                    storePath,
+                    inPath,
                     null,
-                    null,   // immer country_trustscores.json aus Ressourcen
+                    null,
+                    summaryOutput,
                     debug
             );
         } catch (Exception e) {
