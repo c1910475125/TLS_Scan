@@ -4,13 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -35,24 +33,14 @@ public class StoreScorer {
                                char[] passwordIgnored,
                                String countryScoresPath,
                                Path summaryOutput,
-                               Path jsonLogOutput,
                                boolean debug) throws Exception {
         if (looksLikePemFile(storePath)) {
-            scorePemBundle(storePath, countryScoresPath, summaryOutput, jsonLogOutput, debug);
+            scorePemBundle(storePath, countryScoresPath, summaryOutput,debug);
         } else {
             throw new IllegalArgumentException(
                     "Datei sieht nicht wie ein PEM-Zertifikatsbundle aus (kein '-----BEGIN CERTIFICATE-----' gefunden)."
             );
         }
-    }
-
-
-    public void scoreStoreAuto(Path storePath,
-                               char[] passwordIgnored,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               boolean debug) throws Exception {
-        scoreStoreAuto(storePath, passwordIgnored, countryScoresPath, summaryOutput, null, debug);
     }
 
 
@@ -62,15 +50,7 @@ public class StoreScorer {
     public void scoreStore(Path storePath,
                            char[] password,
                            String countryScoresPath, Path summaryOutput) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, null,false);
-    }
-
-    public void scoreStore(Path storePath,
-                           char[] password,
-                           String countryScoresPath,
-                           Path summaryOutput,
-                           Path jsonLogOutput) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, jsonLogOutput, false);
+        scoreKeystore(storePath, password, countryScoresPath, summaryOutput,false);
     }
 
     /**
@@ -80,23 +60,6 @@ public class StoreScorer {
                               char[] password,
                               String countryScoresPath,
                               Path summaryOutput,
-                              Path jsonLogOutput) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, jsonLogOutput, false);
-    }
-
-    public void scoreKeystore(Path storePath,
-                              char[] password,
-                              String countryScoresPath,
-                              Path summaryOutput,
-                              boolean debug) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, null, debug);
-    }
-
-    public void scoreKeystore(Path storePath,
-                              char[] password,
-                              String countryScoresPath,
-                              Path summaryOutput,
-                              Path jsonLogOutput,
                               boolean debug) throws Exception {
 
         KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
@@ -123,7 +86,6 @@ public class StoreScorer {
                 storePath,
                 countryScoresPath,
                 summaryOutput,
-                jsonLogOutput,
                 debug
         );
     }
@@ -135,21 +97,6 @@ public class StoreScorer {
     public void scorePemBundle(Path pemPath,
                                String countryScoresPath,
                                Path summaryOutput,
-                               Path jsonLogOutput) throws Exception {
-        scorePemBundle(pemPath, countryScoresPath, summaryOutput, jsonLogOutput, false);
-    }
-
-    public void scorePemBundle(Path pemPath,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               boolean debug) throws Exception {
-        scorePemBundle(pemPath, countryScoresPath, summaryOutput, null, debug);
-    }
-
-    public void scorePemBundle(Path pemPath,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               Path jsonLogOutput,
                                boolean debug) throws Exception {
 
         CertificateFactory cf = CertificateFactory.getInstance("X.509");
@@ -193,7 +140,6 @@ public class StoreScorer {
                 pemPath,
                 countryScoresPath,
                 summaryOutput,
-                jsonLogOutput,
                 debug
         );
     }
@@ -210,9 +156,7 @@ public class StoreScorer {
     private void scoreCertificates(Collection<X509Certificate> certs,
                                    String storeType,
                                    Path storePath,
-                                   String countryScoresPath,
-                                   Path summaryOutput,
-                                   Path jsonLogOutput,
+                                   String countryScoresPath, Path summaryOutput,
                                    boolean debug) throws IOException {
 
         Map<String, Double> countryScores =
@@ -235,92 +179,44 @@ public class StoreScorer {
 
         Map<String, Long> basicConstraintsCounts = new HashMap<>();
 
-        BufferedWriter jsonWriter = null;
-        try {
-            if (jsonLogOutput != null) {
-                if (jsonLogOutput.getParent() != null) {
-                    Files.createDirectories(jsonLogOutput.getParent());
-                }
-                jsonWriter = Files.newBufferedWriter(
-                        jsonLogOutput,
-                        StandardCharsets.UTF_8,
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.TRUNCATE_EXISTING
-                );
+        for (X509Certificate cert : certs) {
+            totalCerts++;
+
+            java.security.PublicKey pk = cert.getPublicKey();
+            String keyAlg = (pk != null ? pk.getAlgorithm() : null);
+            if (keyAlg != null) {
+                keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
             }
 
-            for (X509Certificate cert : certs) {
-                totalCerts++;
-
-                String issuerDn = null;
-                String subjectDn = null;
-                String issuerCountry = null;
-                String subjectCountry = null;
-                try {
-                    issuerDn = cert.getIssuerX500Principal().getName();
-                    subjectDn = cert.getSubjectX500Principal().getName();
-                    issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
-                    subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
-                } catch (Exception e) {
-                    if (debug) {
-                        System.err.println("[StoreScorer] DN/Land konnte nicht ermittelt werden: " + e.getMessage());
-                    }
-                }
-
-                java.security.PublicKey pk = cert.getPublicKey();
-                String keyAlg = (pk != null ? pk.getAlgorithm() : null);
-                if (keyAlg != null) {
-                    keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
-                }
-
-                Integer bits = Util.extractKeySizeBits(pk);
-                if (bits != null && bits > 0) {
-                    keySizeCounts.merge(bits, 1L, Long::sum);
-                    if (Util.isWeakKeyLength(keyAlg, bits)) {
-                        weakKeyCount++;
-                    }
-                }
-
-                String sigAlg = cert.getSigAlgName();
-                if (sigAlg != null && !sigAlg.isBlank()) {
-                    signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
-                    if (Util.isWeakSignatureAlgorithm(sigAlg)) {
-                        weakSignatureAlgoCount++;
-                    }
-                }
-
-                // BasicConstraints: ist das überhaupt ein CA-Zertifikat?
-                int bc = cert.getBasicConstraints();
-                String bcKey = (bc >= 0) ? "CA" : "EndEntity/Unknown";
-                basicConstraintsCounts.merge(bcKey, 1L, Long::sum);
-
-                CountryTrustUtil.updateCountryCountersForCert(
-                        cert,
-                        countByCountry,
-                        countByCountryForScore,
-                        countryScores
-                );
-
-                if (jsonWriter != null) {
-                    writeJsonLogEntry(
-                            jsonWriter,
-                            storePath,
-                            storeType,
-                            issuerDn,
-                            subjectDn,
-                            issuerCountry,
-                            subjectCountry,
-                            ScanLogUtil.certToPem(cert)
-                    );
+            Integer bits = Util.extractKeySizeBits(pk);
+            if (bits != null && bits > 0) {
+                keySizeCounts.merge(bits, 1L, Long::sum);
+                if (Util.isWeakKeyLength(keyAlg, bits)) {
+                    weakKeyCount++;
                 }
             }
-        } finally {
-            if (jsonWriter != null) {
-                try {
-                    jsonWriter.close();
-                } catch (IOException ignore) {
+
+            String sigAlg = cert.getSigAlgName();
+            if (sigAlg != null && !sigAlg.isBlank()) {
+                signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
+                if (Util.isWeakSignatureAlgorithm(sigAlg)) {
+                    weakSignatureAlgoCount++;
                 }
             }
+
+            // BasicConstraints: ist das überhaupt ein CA-Zertifikat?
+            int bc = cert.getBasicConstraints();
+            String bcKey = (bc >= 0) ? "CA" : "EndEntity/Unknown";
+            basicConstraintsCounts.merge(bcKey, 1L, Long::sum);
+
+            CountryTrustUtil.updateCountryCountersForCert(
+                    cert,
+                    countByCountry,
+                    countByCountryForScore,
+                    countryScores
+            );
+
+
         }
 
         // Gewichtete Länderbeiträge berechnen
@@ -434,45 +330,6 @@ public class StoreScorer {
                     scoreByCountry);
         }
 
-    }
-
-    private void writeJsonLogEntry(
-            BufferedWriter jsonWriter,
-            Path storePath,
-            String storeType,
-            String issuerDn,
-            String subjectDn,
-            String issuerCountry,
-            String subjectCountry,
-            String leafPem
-    ) {
-        try {
-            String sourceName = (storePath != null) ? storePath.toString() : storeType;
-            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
-                    null,
-                    null,
-                    sourceName,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    issuerDn,
-                    subjectDn,
-                    issuerCountry,
-                    subjectCountry,
-                    leafPem,
-                    Collections.emptyList()
-            );
-
-            String json = mapper.writeValueAsString(
-                    ScanLogUtil.buildLogEntry(mapper, "store_score", logData)
-            );
-            jsonWriter.write(json);
-            jsonWriter.newLine();
-        } catch (IOException e) {
-            System.err.println("[StoreScorer] Konnte JSON-Logeintrag nicht schreiben: " + e.getMessage());
-        }
     }
 
     // --- Hilfsfunktionen ------------------------------------------------------------------
