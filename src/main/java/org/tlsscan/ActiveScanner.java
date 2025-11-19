@@ -2,16 +2,12 @@ package org.tlsscan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.maxmind.geoip2.DatabaseReader;
 import com.maxmind.geoip2.exception.AddressNotFoundException;
 import com.maxmind.geoip2.model.AsnResponse;
 import com.maxmind.geoip2.model.CityResponse;
 import com.maxmind.geoip2.model.CountryResponse;
-
-import javax.naming.ldap.LdapName;
-import javax.naming.ldap.Rdn;
 import javax.net.ssl.*;
 import java.io.*;
 import java.net.InetAddress;
@@ -23,7 +19,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.security.cert.Certificate;
-import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -963,8 +958,8 @@ public class ActiveScanner {
                     if (leafCert != null) {
                         issuerDn = leafCert.getIssuerX500Principal().getName();
                         subjectDn = leafCert.getSubjectX500Principal().getName();
-                        issuerCountry = extractCountryFromDn(issuerDn);
-                        subjectCountry = extractCountryFromDn(subjectDn);
+                        issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
+                        subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
                     }
                 }
             } catch (Exception e) {
@@ -1038,38 +1033,23 @@ public class ActiveScanner {
                 return null;
             }
 
-            ObjectNode data = mapper.createObjectNode();
-            data.put("ip", ip);
-            data.put("port", port);
-            data.put("hostname", ip);
-
-            if (version != null) data.put("tls_version", version);
-            if (cipherSuite != null) data.put("cipher_suite", cipherSuite);
-            if (countryIso != null) data.put("country_iso", countryIso);
-            if (asn != null) data.put("asn", asn);
-            if (cityName != null) data.put("city_name", cityName);
-
-            if (issuerDn != null) data.put("issuer_dn", issuerDn);
-            if (subjectDn != null) data.put("subject_dn", subjectDn);
-            if (issuerCountry != null) data.put("issuer_country", issuerCountry);
-            if (subjectCountry != null) data.put("subject_country", subjectCountry);
-
-            if (leafPem != null) {
-                ObjectNode leafCertNode = mapper.createObjectNode();
-                leafCertNode.put("pem", leafPem);
-                data.set("leaf_cert", leafCertNode);
-            }
-
-            ArrayNode chainArr = mapper.createArrayNode();
-            for (String pem : chainPem) {
-                chainArr.add(pem);
-            }
-            data.set("chain", chainArr);
-
-            ObjectNode out = mapper.createObjectNode();
-            out.put("message_type", "active_scan");
-            out.set("data", data);
-            return out;
+            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
+                    ip,
+                    port,
+                    ip,
+                    version,
+                    cipherSuite,
+                    countryIso,
+                    asn,
+                    cityName,
+                    issuerDn,
+                    subjectDn,
+                    issuerCountry,
+                    subjectCountry,
+                    leafPem,
+                    chainPem
+            );
+            return ScanLogUtil.buildLogEntry(mapper, "active_scan", logData);
         }
 
         private String derBase64ToPem(String rawB64) {
@@ -1101,27 +1081,6 @@ public class ActiveScanner {
                 }
                 return null;
             }
-        }
-
-        private String extractCountryFromDn(String dn) {
-            if (dn == null || dn.isBlank()) return null;
-            try {
-                LdapName ldapName = new LdapName(dn);
-                for (Rdn rdn : ldapName.getRdns()) {
-                    if ("C".equalsIgnoreCase(rdn.getType())) {
-                        Object val = rdn.getValue();
-                        if (val != null) {
-                            String c = val.toString().trim();
-                            if (!c.isEmpty()) return c;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                if (debug) {
-                    System.err.println("[DN] Fehler beim Parsen von '" + dn + "': " + e.getMessage());
-                }
-            }
-            return null;
         }
 
         // ---------- interne Java-TLS-Engine -----------------------------------------------------
@@ -1241,7 +1200,7 @@ public class ActiveScanner {
                     leaf = (X509Certificate) peer[0];
                     for (Certificate c : peer) {
                         if (c instanceof X509Certificate) {
-                            String pem = certToPem((X509Certificate) c);
+                            String pem = ScanLogUtil.certToPem((X509Certificate) c);
                             if (pem != null) {
                                 chainPem.add(pem);
                             }
@@ -1272,8 +1231,8 @@ public class ActiveScanner {
                 try {
                     issuerDn = leaf.getIssuerX500Principal().getName();
                     subjectDn = leaf.getSubjectX500Principal().getName();
-                    issuerCountry = extractCountryFromDn(issuerDn);
-                    subjectCountry = extractCountryFromDn(subjectDn);
+                    issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
+                    subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
                 } catch (Exception e) {
                     if (debug) {
                         System.err.println("[ActiveScan] DN/Länder-Fehler für " + hp.host + ":" + hp.port + " -> " + e.getMessage());
@@ -1326,39 +1285,29 @@ public class ActiveScanner {
                 }
             }
 
-            ObjectNode data = mapper.createObjectNode();
-            data.put("ip", ipStr);
-            data.put("port", hp.port);
-            data.put("hostname", hp.host);
-            data.put("tls_version", protocol);
-            data.put("cipher_suite", cipherSuite);
-            if (countryIso != null) data.put("country_iso", countryIso);
-            if (asn != null) data.put("asn", asn);
-            if (cityName != null) data.put("city_name", cityName);
-            if (issuerDn != null) data.put("issuer_dn", issuerDn);
-            if (subjectDn != null) data.put("subject_dn", subjectDn);
-            if (issuerCountry != null) data.put("issuer_country", issuerCountry);
-            if (subjectCountry != null) data.put("subject_country", subjectCountry);
+            String leafPem = ScanLogUtil.certToPem(leaf);
 
-            String leafPem = certToPem(leaf);
-            if (leafPem != null) {
-                ObjectNode leafCertNode = mapper.createObjectNode();
-                leafCertNode.put("pem", leafPem);
-                data.set("leaf_cert", leafCertNode);
-            }
-
-            ArrayNode chainArr = mapper.createArrayNode();
-            for (String pem : chainPem) {
-                chainArr.add(pem);
-            }
-            data.set("chain", chainArr);
-
-            ObjectNode root = mapper.createObjectNode();
-            root.put("message_type", "active_scan");
-            root.set("data", data);
+            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
+                    ipStr,
+                    hp.port,
+                    hp.host,
+                    protocol,
+                    cipherSuite,
+                    countryIso,
+                    asn,
+                    cityName,
+                    issuerDn,
+                    subjectDn,
+                    issuerCountry,
+                    subjectCountry,
+                    leafPem,
+                    chainPem
+            );
 
             try {
-                String json = mapper.writeValueAsString(root);
+                String json = mapper.writeValueAsString(
+                        ScanLogUtil.buildLogEntry(mapper, "active_scan", logData)
+                );
                 synchronized (writer) {
                     writer.write(json);
                     writer.write("\n");
@@ -1524,25 +1473,5 @@ public class ActiveScanner {
             return true;
         }
 
-        private String certToPem(X509Certificate cert) {
-            if (cert == null) return null;
-            try {
-                byte[] der = cert.getEncoded();
-                String b64 = Base64.getEncoder().encodeToString(der);
-                StringBuilder sb = new StringBuilder();
-                sb.append("-----BEGIN CERTIFICATE-----\n");
-                for (int i = 0; i < b64.length(); i += 64) {
-                    int end = Math.min(i + 64, b64.length());
-                    sb.append(b64, i, end).append("\n");
-                }
-                sb.append("-----END CERTIFICATE-----\n");
-                return sb.toString();
-            } catch (CertificateEncodingException e) {
-                if (debug) {
-                    System.err.println("[PEM] Encoding-Fehler: " + e.getMessage());
-                }
-                return null;
-            }
-        }
     }
 }

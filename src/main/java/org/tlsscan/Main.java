@@ -365,6 +365,7 @@ public class Main implements Callable<Integer> {
                     null,
                     null,
                     summaryOutput,
+                    null,
                     debug
             );
         } catch (Exception e) {
