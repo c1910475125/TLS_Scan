@@ -364,25 +364,17 @@ public class ActiveScanner {
                 }
             }
 
-            boolean hasCountryOrCityDb = (countryDb != null || cityDb != null);
-            boolean hasCityDb = (cityDb != null);
-            boolean hasAsnDb = (asnDb != null);
-
-            if (!allowedCountries.isEmpty() && !hasCountryOrCityDb) {
-                System.err.println("[GeoIP] Länderfilter gesetzt, aber keine Country/City-DB geladen – "
-                        + "Geo-Filter über MMDB ist für Einzelziele nicht möglich. "
-                        + "CSV-basierte Geo-Scans (Random/Country-Full) nutzen den Länderfilter weiterhin.");
-                // NICHT: allowedCountries.clear();
+            if (!allowedCountries.isEmpty() && countryDb == null && cityDb == null) {
+                System.err.println("[GeoIP] Länderfilter gesetzt, aber keine Country/City-DB geladen – Länderfilter wird ignoriert.");
+                allowedCountries.clear();
             }
-            if (!allowedCities.isEmpty() && !hasCityDb) {
-                System.err.println("[GeoIP] Städtefilter gesetzt, aber keine City-DB geladen – "
-                        + "Städtefilter über MMDB ist für Einzelziele nicht möglich.");
-                // NICHT: allowedCities.clear();
+            if (!allowedCities.isEmpty() && cityDb == null) {
+                System.err.println("[GeoIP] Städtefilter gesetzt, aber keine City-DB geladen – Städtefilter wird ignoriert.");
+                allowedCities.clear();
             }
-            if (!allowedAsns.isEmpty() && !hasAsnDb) {
-                System.err.println("[GeoIP] ASN-Filter gesetzt, aber keine ASN-DB geladen – "
-                        + "ASN-Filter über MMDB ist für Einzelziele nicht möglich.");
-                // NICHT: allowedAsns.clear();
+            if (!allowedAsns.isEmpty() && asnDb == null) {
+                System.err.println("[GeoIP] ASN-Filter gesetzt, aber keine ASN-DB geladen – ASN-Filter wird ignoriert.");
+                allowedAsns.clear();
             }
 
             this.randomSampleCount = (adv != null && adv.randomSampleCount != null) ? adv.randomSampleCount : 0;
