@@ -72,7 +72,7 @@ public class Main implements Callable<Integer> {
         while (true) {
             System.out.println("\n=== TLS Analyzer – Menü ===");
             System.out.println("1) Aktiver TLS-Scan (konkrete Hosts, IPs & IP-Ranges)");
-            System.out.println("2) Geo-Länderscan (GeoLite2, ganze Länder / Zufallsstichprobe)");
+            System.out.println("2) GeoLite-Scan (Country / City / ASN)");
             System.out.println("3) JSONL analysieren");
             System.out.println("4) TrustStore bewerten");
             System.out.println("0) Beenden");
@@ -80,7 +80,7 @@ public class Main implements Callable<Integer> {
             String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4"), null);
             switch (choice) {
                 case "1" -> runIpScanInteractive(in);
-                case "2" -> runCountryScanInteractive(in);
+                case "2" -> runGeoScanInteractive(in);
                 case "3" -> runAnalyzeInteractive(in);
                 case "4" -> runStoreScoreInteractive(in);
                 case "0" -> {
@@ -188,9 +188,9 @@ public class Main implements Callable<Integer> {
 
     // --- 2) Country-Scan (Geo) ------------------------------------------------------------
 
-    private static void runCountryScanInteractive(Scanner in) {
-        System.out.println("\n--- Geo-Länderscan (GeoLite2) ---");
-        System.out.println("Scannt IPs, die in den GeoLite2-Country-Datenbanken liegen.");
+    private static void runGeoScanInteractive(Scanner in) {
+        System.out.println("\n--- GeoLite-Scan (GeoLite2) ---");
+        System.out.println("Scannt IPs, die in den GeoLite2-Datenbanken liegen (Country / City / ASN).");
         System.out.println("Basis-Output-Ordner: " + defaultScanDir());
 
         String outFileName = promptFree(in,
@@ -201,19 +201,55 @@ public class Main implements Callable<Integer> {
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
-        String isoStr = promptFree(in,
-                "Länder-ISO-Codes (z.B. AT,DE,US – leer = alle Länder in GeoLite2)",
-                "");
+        // NEU: Auswahl des Geo-Filter-Typs
+        String geoMode = readChoice(in,
+                "Geo-Filter-Typ [country|city|asn]",
+                Set.of("country", "city", "asn"),
+                "country");
+
         List<String> isoList = new ArrayList<>();
-        if (isoStr != null && !isoStr.isBlank()) {
-            for (String c : isoStr.split(",")) {
-                c = c.trim().toUpperCase(Locale.ROOT);
-                if (!c.isEmpty()) isoList.add(c);
+        List<String> cityList = new ArrayList<>();
+        List<Long> asnList = new ArrayList<>();
+
+        if ("country".equals(geoMode)) {
+            String isoStr = promptFree(in,
+                    "Länder-ISO-Codes (z.B. AT,DE,US – leer = alle Länder in GeoLite2)",
+                    "");
+            if (isoStr != null && !isoStr.isBlank()) {
+                for (String c : isoStr.split(",")) {
+                    c = c.trim().toUpperCase(Locale.ROOT);
+                    if (!c.isEmpty()) isoList.add(c);
+                }
+            }
+        } else if ("city".equals(geoMode)) {
+            String cityStr = promptFree(in,
+                    "Städte (kommagetrennt, z.B. Vienna,Munich – leer = alle Cities)",
+                    "");
+            if (cityStr != null && !cityStr.isBlank()) {
+                for (String c : cityStr.split(",")) {
+                    c = c.trim();
+                    if (!c.isEmpty()) cityList.add(c);
+                }
+            }
+        } else if ("asn".equals(geoMode)) {
+            String asnStr = promptFree(in,
+                    "ASNs (kommagetrennt, z.B. 680,3320 – leer = alle ASNs)",
+                    "");
+            if (asnStr != null && !asnStr.isBlank()) {
+                for (String a : asnStr.split(",")) {
+                    a = a.trim();
+                    if (a.isEmpty()) continue;
+                    try {
+                        asnList.add(Long.parseLong(a));
+                    } catch (NumberFormatException e) {
+                        System.out.println("Ignoriere ungültige ASN: " + a);
+                    }
+                }
             }
         }
 
         int randomCount = (int) readLong(in,
-                "Zufallsstichprobe: Anzahl Hosts aus Country-Blocks-CSV (0 = vollständiger Länderscan)",
+                "Zufallsstichprobe: Anzahl Hosts aus GeoLite-Blocks-CSV (0 = vollständiger Scan)",
                 0, 0, 1_000_000);
 
         boolean enableFullScan = (randomCount == 0);
@@ -222,6 +258,8 @@ public class Main implements Callable<Integer> {
         adv.randomSampleCount = randomCount;
         adv.enableCountryFullScan = enableFullScan;
         adv.countryIsoCodes = isoList;
+        adv.cityNames = cityList;
+        adv.asns = asnList;
 
         Path zgrabPath = projectRoot()
                 .resolve("bin")
@@ -250,9 +288,11 @@ public class Main implements Callable<Integer> {
                     adv
             );
         } catch (Exception e) {
-            System.err.println("Fehler beim Länderscan: " + e.getMessage());
+            System.err.println("Fehler beim GeoLite-Scan: " + e.getMessage());
         }
     }
+
+
     // --- 5) Analyzer ----------------------------------------------------------------------
 
     private static void runAnalyzeInteractive(Scanner in) {
@@ -365,6 +405,7 @@ public class Main implements Callable<Integer> {
                     null,
                     null,
                     summaryOutput,
+                    null,
                     debug
             );
         } catch (Exception e) {

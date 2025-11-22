@@ -1,5 +1,15 @@
 package org.tlsscan;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.maxmind.geoip2.DatabaseReader;
+import com.maxmind.geoip2.exception.AddressNotFoundException;
+import com.maxmind.geoip2.exception.GeoIp2Exception;
+import com.maxmind.geoip2.model.AsnResponse;
+import com.maxmind.geoip2.model.CityResponse;
+import com.maxmind.geoip2.model.CountryResponse;
+
+import java.io.IOException;
+import java.net.InetAddress;
 import java.security.PublicKey;
 import java.security.interfaces.DSAPublicKey;
 import java.security.interfaces.ECPublicKey;
@@ -96,5 +106,89 @@ public final class Util {
         return s.contains("MD5") || s.contains("SHA1");
     }
 
+    public static class WeakKeyFinding {
+        final String subject;
+        final String issuer;
+        final String algorithm;
+        final Integer bits;
+        final String reason;
+
+        WeakKeyFinding(String subject, String issuer, String algorithm, Integer bits, String reason) {
+            this.subject = subject;
+            this.issuer = issuer;
+            this.algorithm = algorithm;
+            this.bits = bits;
+            this.reason = reason;
+        }
+    }
+
+    public static String describeWeakKeyLengthReason(String algo, int bits) {
+        if (algo == null) {
+            return "Unbekannter Algorithmus mit " + bits + " Bit gilt als schwach";
+        }
+        String a = algo.toUpperCase(Locale.ROOT);
+
+        if (a.contains("RSA") || a.contains("DSA")) {
+            return "Schlüssellänge " + bits + " Bit < 2048 Bit (empfohlenes Minimum für " + algo + ")";
+        }
+        if (a.contains("EC") || a.contains("ECDSA") || a.contains("ECDH")) {
+            return "Schlüssellänge " + bits + " Bit < 224 Bit (empfohlenes Minimum für " + algo + ")";
+        }
+        return "Schlüssellänge " + bits + " Bit gilt als schwach für " + algo;
+    }
+
+    public static class WeakSignatureFinding {
+        final String subject;
+        final String issuer;
+        final String signatureAlgorithm;
+        final String reason;
+
+        WeakSignatureFinding(String subject, String issuer, String signatureAlgorithm, String reason) {
+            this.subject = subject;
+            this.issuer = issuer;
+            this.signatureAlgorithm = signatureAlgorithm;
+            this.reason = reason;
+        }
+    }
+
+    public static String describeWeakSignatureReason(String sigAlg) {
+        if (sigAlg == null) {
+            return "Unbekannter Signaturalgorithmus gilt als schwach";
+        }
+        String s = sigAlg.toUpperCase(Locale.ROOT);
+
+        if (s.contains("MD5")) {
+            return sigAlg + " verwendet MD5 (kryptographisch gebrochen)";
+        }
+        if (s.contains("SHA1")) {
+            return sigAlg + " verwendet SHA1 (nicht mehr als sicher eingestuft)";
+        }
+        // ggf. weitere Regeln
+        return sigAlg + " gilt in dieser Konfiguration als schwach";
+    }
+
+    public static class DeprecatedTlsFinding {
+        final String endpoint;     // z.B. "ip:port" oder Hostname
+        final String tlsVersion;
+        final String reason;
+
+        DeprecatedTlsFinding(String endpoint, String tlsVersion, String reason) {
+            this.endpoint = endpoint;
+            this.tlsVersion = tlsVersion;
+            this.reason = reason;
+        }
+    }
+
+    public static String extractEndpointFromRecord(JsonNode node) {
+        String ip = node.path("ip").asText(null);
+        String domain = node.path("domain").asText(null);
+        String port = node.path("port").asText(null);
+
+        if (domain != null && port != null) return domain + ":" + port;
+        if (ip != null && port != null) return ip + ":" + port;
+        if (domain != null) return domain;
+        if (ip != null) return ip;
+        return "unknown-endpoint";
+    }
 
 }

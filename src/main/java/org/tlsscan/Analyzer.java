@@ -2,9 +2,9 @@ package org.tlsscan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.tlsscan.RevocationUtil.RevocationStatus;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -56,6 +56,10 @@ public class Analyzer {
         Map<String, Long> tlsVersionCounts = new HashMap<>();
         Map<String, Long> deprecatedTlsVersionCounts = new HashMap<>();
 
+        List<Util.WeakKeyFinding> weakKeyFindings = new ArrayList<>();
+        List<Util.WeakSignatureFinding> weakSignatureFindings = new ArrayList<>();
+        List<Util.DeprecatedTlsFinding> deprecatedTlsFindings = new ArrayList<>();
+
 
         Map<String, Long> cipherSuiteCounts = new HashMap<>();
         Map<String, Long> weakCipherSuiteCounts = new HashMap<>();
@@ -97,6 +101,17 @@ public class Analyzer {
                             tlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
                             if (Util.isDeprecatedTlsVersion(tlsVersion)) {
                                 deprecatedTlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
+
+                                String endpoint = Util.extractEndpointFromRecord(dataNode); // Pseudocode, unten Kommentar
+
+                                String reason = "Verwendung veralteter TLS-Version " + tlsVersion;
+
+                                deprecatedTlsFindings.add(new Util.DeprecatedTlsFinding(
+                                        endpoint,
+                                        tlsVersion,
+                                        reason
+                                ));
+
                             }
                         }
 
@@ -151,6 +166,19 @@ public class Analyzer {
                                 keySizeCounts.merge(bits, 1L, Long::sum);
                                 if (Util.isWeakKeyLength(keyAlg, bits)) {
                                     weakKeyCount++;
+
+                                    String reason = Util.describeWeakKeyLengthReason(keyAlg, bits);
+
+                                    String subject = leafCert.getSubjectX500Principal().getName();
+                                    String issuer  = leafCert.getIssuerX500Principal().getName();
+
+                                    weakKeyFindings.add(new Util.WeakKeyFinding(
+                                            subject,
+                                            issuer,
+                                            keyAlg,
+                                            bits,
+                                            reason
+                                    ));
                                 }
                             }
 
@@ -159,6 +187,17 @@ public class Analyzer {
                                 signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
                                 if (Util.isWeakSignatureAlgorithm(sigAlg)) {
                                     weakSignatureAlgoCount++;
+
+                                    String subject = leafCert.getSubjectX500Principal().getName();
+                                    String issuer  = leafCert.getIssuerX500Principal().getName();
+                                    String reason  = Util.describeWeakSignatureReason(sigAlg);
+
+                                    weakSignatureFindings.add(new Util.WeakSignatureFinding(
+                                            subject,
+                                            issuer,
+                                            sigAlg,
+                                            reason
+                                    ));
                                 }
                             }
 
@@ -366,6 +405,14 @@ public class Analyzer {
             deprecatedTlsVersionCounts.entrySet().stream()
                     .sorted(Map.Entry.comparingByKey())
                     .forEach(e -> System.out.printf("  %-10s %8d%n", e.getKey(), e.getValue()));
+
+            System.out.println("Details zu Verbindungen mit veralteter TLS-Version:");
+            for (Util.DeprecatedTlsFinding f : deprecatedTlsFindings) {
+                System.out.println("  Endpoint: " + f.endpoint);
+                System.out.println("    Version: " + f.tlsVersion);
+                System.out.println("    Grund:   " + f.reason);
+                System.out.println();
+            }
         }
 
 // Cipher-Suites
@@ -396,6 +443,17 @@ public class Analyzer {
                 .forEach(e -> System.out.printf("  %4d Bit %8d%n", e.getKey(), e.getValue()));
         System.out.println("Davon mit schwacher Schlüssellänge: " + weakKeyCount);
 
+        if (!weakKeyFindings.isEmpty()) {
+            System.out.println("Details zu schwachen Schlüsseln:");
+            for (Util.WeakKeyFinding f : weakKeyFindings) {
+                System.out.println("  Subject: " + f.subject);
+                System.out.println("    Issuer:  " + f.issuer);
+                System.out.println("    Algo:    " + f.algorithm + " (" + f.bits + " Bit)");
+                System.out.println("    Grund:   " + f.reason);
+                System.out.println();
+            }
+        }
+
 // Signaturalgorithmen
         System.out.println();
         System.out.println("Signaturalgorithmen (Leaf):");
@@ -403,6 +461,17 @@ public class Analyzer {
                 System.out.printf("  %-20s %8d%n", alg, count));
         System.out.println("Zertifikatsketten mit schwacher Signatur irgendwo in der Kette: "
                 + chainsWithWeakSig);
+
+        if (!weakSignatureFindings.isEmpty()) {
+            System.out.println("Details zu schwachen Signaturen:");
+            for (Util.WeakSignatureFinding f : weakSignatureFindings) {
+                System.out.println("  Subject: " + f.subject);
+                System.out.println("    Issuer:   " + f.issuer);
+                System.out.println("    SigAlg:   " + f.signatureAlgorithm);
+                System.out.println("    Grund:    " + f.reason);
+                System.out.println();
+            }
+        }
 
 // Chain-Qualität (sehr grob über Länge)
         System.out.println();
@@ -421,7 +490,8 @@ public class Analyzer {
 
 
         if (summaryOutput != null) {
-            writeSummaryJson(summaryOutput,
+            writeSummaryJson(
+                    summaryOutput,
                     inputJsonl,
                     lines,
                     certs,
@@ -435,7 +505,22 @@ public class Analyzer {
                     chainsWithAnySct,
                     revGood,
                     revRevoked,
-                    revUnknown);
+                    revUnknown,
+                    tlsVersionCounts,
+                    deprecatedTlsVersionCounts,
+                    cipherSuiteCounts,
+                    weakCipherSuiteCounts,
+                    keyAlgorithmCounts,
+                    keySizeCounts,
+                    weakKeyCount,
+                    signatureAlgorithmCounts,
+                    chainsWithWeakSig,
+                    chainLengthCounts,
+                    weakKeyFindings,
+                    weakSignatureFindings,
+                    deprecatedTlsFindings
+            );
+
         }
 
     }
@@ -600,7 +685,20 @@ public class Analyzer {
             long chainsWithAnySct,
             long revGood,
             long revRevoked,
-            long revUnknown
+            long revUnknown,
+            Map<String, Long> tlsVersionCounts,
+            Map<String, Long> deprecatedTlsVersionCounts,
+            Map<String, Long> cipherSuiteCounts,
+            Map<String, Long> weakCipherSuiteCounts,
+            Map<String, Long> keyAlgorithmCounts,
+            Map<Integer, Long> keySizeCounts,
+            long weakKeyCount,
+            Map<String, Long> signatureAlgorithmCounts,
+            long chainsWithWeakSig,
+            Map<Integer, Long> chainLengthCounts,
+            List<Util.WeakKeyFinding> weakKeyFindings,
+            List<Util.WeakSignatureFinding> weakSignatureFindings,
+            List<Util.DeprecatedTlsFinding> deprecatedTlsFindings
     ) {
         try {
             ObjectNode root = mapper.createObjectNode();
@@ -608,18 +706,82 @@ public class Analyzer {
             root.put("lines", lines);
             root.put("cert_chains", certs);
 
-            ObjectNode countryNode = root.putObject("root_ca_country");
-            ObjectNode countsNode = countryNode.putObject("counts");
-            for (Map.Entry<String, Long> e : countByCountry.entrySet()) {
-                countsNode.put(e.getKey(), e.getValue());
-            }
-            ObjectNode scoresNode = countryNode.putObject("scores");
-            for (Map.Entry<String, Double> e : scoreByCountry.entrySet()) {
-                scoresNode.put(e.getKey(), e.getValue());
-            }
+// Root-CA-Länder
+            ObjectNode rootCountry = root.putObject("root_ca_country");
+            ObjectNode countsNode = rootCountry.putObject("counts");
+            countByCountry.forEach(countsNode::put);
+
+            ObjectNode scoresNode = rootCountry.putObject("scores");
+            scoreByCountry.forEach(scoresNode::put);
 
             root.put("Total trustscore:", totalscore);
 
+// ==== Technische TLS-Details ====
+            ObjectNode techNode = root.putObject("tls_tech");
+
+// TLS-Versionen
+            ObjectNode tlsNode = techNode.putObject("tls_versions");
+            ObjectNode tlsAllNode = tlsNode.putObject("all");
+            tlsVersionCounts.forEach(tlsAllNode::put);
+            ObjectNode tlsDeprecatedNode = tlsNode.putObject("deprecated");
+            deprecatedTlsVersionCounts.forEach(tlsDeprecatedNode::put);
+            ArrayNode deprecatedDetails = tlsNode.putArray("deprecated_details");
+            for (Util.DeprecatedTlsFinding f : deprecatedTlsFindings) {
+                ObjectNode n = deprecatedDetails.addObject();
+                n.put("endpoint",   f.endpoint);
+                n.put("tls_version", f.tlsVersion);
+                n.put("reason",      f.reason);
+            }
+
+// Cipher-Suites
+            ObjectNode cipherNode = techNode.putObject("cipher_suites");
+            ObjectNode cipherAllNode = cipherNode.putObject("all");
+            cipherSuiteCounts.forEach(cipherAllNode::put);
+            ObjectNode cipherWeakNode = cipherNode.putObject("weak");
+            weakCipherSuiteCounts.forEach(cipherWeakNode::put);
+
+// Schlüssel
+            ObjectNode keyNode = techNode.putObject("keys");
+            ObjectNode keyAlgNode = keyNode.putObject("algorithms");
+            keyAlgorithmCounts.forEach(keyAlgNode::put);
+
+            ObjectNode keySizeNode = keyNode.putObject("sizes_bits");
+            keySizeCounts.forEach((bits, count) ->
+                    keySizeNode.put(String.valueOf(bits), count));
+            keyNode.put("weak_key_count", weakKeyCount);
+
+            ArrayNode weakArr = keyNode.putArray("weak_key_details");
+            for (Util.WeakKeyFinding f : weakKeyFindings) {
+                ObjectNode n = weakArr.addObject();
+                n.put("subject",   f.subject);
+                n.put("issuer",    f.issuer);
+                n.put("algorithm", f.algorithm);
+                if (f.bits != null) {
+                    n.put("size_bits", f.bits);
+                }
+                n.put("reason",    f.reason);
+            }
+
+// Signaturen
+            ObjectNode sigNode = techNode.putObject("signatures");
+            ObjectNode sigAlgNode = sigNode.putObject("algorithms");
+            signatureAlgorithmCounts.forEach(sigAlgNode::put);
+            sigNode.put("chains_with_weak_signature", chainsWithWeakSig);
+            ArrayNode weakSigDetails = sigNode.putArray("weak_signature_details");
+            for (Util.WeakSignatureFinding f : weakSignatureFindings) {
+                ObjectNode n = weakSigDetails.addObject();
+                n.put("subject",   f.subject);
+                n.put("issuer",    f.issuer);
+                n.put("algorithm", f.signatureAlgorithm);
+                n.put("reason",    f.reason);
+            }
+
+// Chain-Längen
+            ObjectNode chainNode = techNode.putObject("chain_length");
+            chainLengthCounts.forEach((len, count) ->
+                    chainNode.put(String.valueOf(len), count));
+
+// ==== Ende NEU ====
             ObjectNode revNode = root.putObject("revocation");
             revNode.put("leaf_with_crl_dp", leafWithCrlDp);
             revNode.put("leaf_with_ocsp_aia", leafWithOcspAia);
@@ -629,6 +791,7 @@ public class Analyzer {
             revNode.put("status_good", revGood);
             revNode.put("status_revoked", revRevoked);
             revNode.put("status_unknown", revUnknown);
+
 
             if (summaryOutput.getParent() != null) {
                 Files.createDirectories(summaryOutput.getParent());
@@ -641,6 +804,7 @@ public class Analyzer {
             System.err.println("Konnte Analyse-Summary nicht schreiben: " + e.getMessage());
         }
     }
+
 
 
 }
