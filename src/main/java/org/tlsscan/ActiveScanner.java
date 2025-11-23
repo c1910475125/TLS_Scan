@@ -1139,32 +1139,14 @@ public class ActiveScanner {
                 if (cityDb != null) {
                     try {
                         CityResponse cityResp = cityDb.city(addr);
-                        if (cityResp != null && cityResp.getCity() != null) {
-                            countryIso = cityResp.getCity().getName();
-                            if (countryIso != null) {
-                                countryIso = countryIso.toUpperCase(Locale.ROOT);
+                        if (cityResp != null && cityResp.getCountry() != null) {
+                            cityName = cityResp.getCity().getName();
+                            if (cityName != null) {
+                                cityName = cityName.toUpperCase(Locale.ROOT);
                             }
                         }
-                    } catch (AddressNotFoundException ignored) {}
-                }
-
-
-//                if (cityDb != null) {
-//                    try {
-//                        CityResponse cityResp = cityDb.city(addr);
-//                        if (cityResp != null) {
-//                            if (cityResp.getCity() != null) {
-//                                cityName = cityResp.getCity().getName();
-//                            }
-//                            if (countryIso == null &&
-//                                    cityResp.getCountry() != null &&
-//                                    cityResp.getCountry().getIsoCode() != null) {
-//                                countryIso = cityResp.getCountry().getIsoCode().toUpperCase(Locale.ROOT);
-//                            }
-//                        }
-//                    } catch (AddressNotFoundException ignored) {}
-//                }
-
+                            } catch (AddressNotFoundException ignored) {}
+                        }
 
                 if (asnDb != null) {
                     try {
@@ -1186,11 +1168,13 @@ public class ActiveScanner {
                         return null;
                     }
                 }
+
                 if (!allowedCities.isEmpty()) {
-                    if (cityName == null) return null;
-                    String normCity = cityName.trim().toLowerCase(Locale.ROOT);
-                    if (!allowedCities.contains(normCity)) return null;
+                    if (cityName == null || !allowedCities.contains(cityName)) {
+                        return null;
+                    }
                 }
+
             } catch (Exception e) {
                 if (debug) {
                     System.err.println("[GeoIP-zgrab] " + ip + " -> " + e.getMessage());
