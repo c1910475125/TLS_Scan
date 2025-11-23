@@ -211,38 +211,42 @@ public class Main implements Callable<Integer> {
         List<String> cityList = new ArrayList<>();
         List<Long> asnList = new ArrayList<>();
 
-        if ("country".equals(geoMode)) {
-            String isoStr = promptFree(in,
-                    "Länder-ISO-Codes (z.B. AT,DE,US – leer = alle Länder in GeoLite2)",
-                    "");
-            if (isoStr != null && !isoStr.isBlank()) {
-                for (String c : isoStr.split(",")) {
-                    c = c.trim().toUpperCase(Locale.ROOT);
-                    if (!c.isEmpty()) isoList.add(c);
+        switch (geoMode) {
+            case "country" -> {
+                String isoStr = promptFree(in,
+                        "Länder-ISO-Codes (z.B. AT,DE,US – leer = alle Länder in GeoLite2)",
+                        "");
+                if (isoStr != null && !isoStr.isBlank()) {
+                    for (String c : isoStr.split(",")) {
+                        c = c.trim().toUpperCase(Locale.ROOT);
+                        if (!c.isEmpty()) isoList.add(c);
+                    }
                 }
             }
-        } else if ("city".equals(geoMode)) {
-            String cityStr = promptFree(in,
-                    "Städte (kommagetrennt, z.B. Vienna,Munich – leer = alle Cities)",
-                    "");
-            if (cityStr != null && !cityStr.isBlank()) {
-                for (String c : cityStr.split(",")) {
-                    c = c.trim();
-                    if (!c.isEmpty()) cityList.add(c);
+            case "city" -> {
+                String cityStr = promptFree(in,
+                        "Städte (kommagetrennt, z.B. Vienna,Munich – leer = alle Cities)",
+                        "");
+                if (cityStr != null && !cityStr.isBlank()) {
+                    for (String c : cityStr.split(",")) {
+                        c = c.trim();
+                        if (!c.isEmpty()) cityList.add(c);
+                    }
                 }
             }
-        } else if ("asn".equals(geoMode)) {
-            String asnStr = promptFree(in,
-                    "ASNs (kommagetrennt, z.B. 680,3320 – leer = alle ASNs)",
-                    "");
-            if (asnStr != null && !asnStr.isBlank()) {
-                for (String a : asnStr.split(",")) {
-                    a = a.trim();
-                    if (a.isEmpty()) continue;
-                    try {
-                        asnList.add(Long.parseLong(a));
-                    } catch (NumberFormatException e) {
-                        System.out.println("Ignoriere ungültige ASN: " + a);
+            case "asn" -> {
+                String asnStr = promptFree(in,
+                        "ASNs (kommagetrennt, z.B. 680,3320 – leer = alle ASNs)",
+                        "");
+                if (asnStr != null && !asnStr.isBlank()) {
+                    for (String a : asnStr.split(",")) {
+                        a = a.trim();
+                        if (a.isEmpty()) continue;
+                        try {
+                            asnList.add(Long.parseLong(a));
+                        } catch (NumberFormatException e) {
+                            System.out.println("Ignoriere ungültige ASN: " + a);
+                        }
                     }
                 }
             }

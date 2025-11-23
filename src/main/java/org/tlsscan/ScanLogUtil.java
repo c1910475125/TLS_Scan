@@ -32,6 +32,7 @@ public final class ScanLogUtil {
             List<String> chainPem
     ) { }
 
+
     private ScanLogUtil() {
         // Utility-Klasse
     }
@@ -78,13 +79,6 @@ public final class ScanLogUtil {
      * Wandelt ein Zertifikat in PEM-Format um.
      */
     public static String certToPem(X509Certificate cert) {
-        if (cert == null) return null;
-        try {
-            byte[] der = cert.getEncoded();
-            String b64 = Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(der);
-            return "-----BEGIN CERTIFICATE-----\n" + b64 + "\n-----END CERTIFICATE-----\n";
-        } catch (CertificateEncodingException e) {
-            return null;
-        }
+        return AnalyzeUtil.certToPem(cert);
     }
 }

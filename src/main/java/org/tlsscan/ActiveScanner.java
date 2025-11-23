@@ -1142,7 +1142,7 @@ public class ActiveScanner {
                         if (cityResp != null && cityResp.getCountry() != null) {
                             cityName = cityResp.getCity().getName();
                             if (cityName != null) {
-                                cityName = cityName.toUpperCase(Locale.ROOT);
+                                cityName = cityName.toLowerCase(Locale.ROOT);
                             }
                         }
                             } catch (AddressNotFoundException ignored) {}
@@ -1155,24 +1155,6 @@ public class ActiveScanner {
                             asn = aResp.getAutonomousSystemNumber();
                         }
                     } catch (AddressNotFoundException ignored) {}
-                }
-
-                // Geo-Filter anwenden
-                if (!allowedCountries.isEmpty()) {
-                    if (countryIso == null || !allowedCountries.contains(countryIso)) {
-                        return null;
-                    }
-                }
-                if (!allowedAsns.isEmpty()) {
-                    if (asn == null || !allowedAsns.contains(asn)) {
-                        return null;
-                    }
-                }
-
-                if (!allowedCities.isEmpty()) {
-                    if (cityName == null || !allowedCities.contains(cityName)) {
-                        return null;
-                    }
                 }
 
             } catch (Exception e) {
