@@ -79,11 +79,9 @@ public class ActiveScanner {
     public void scan(List<String> rawTargets,
                      List<Integer> ports,
                      Path outputJsonl,
-                     String countryScores,
                      boolean debug,
                      int timeoutMs,
                      int concurrency,
-                     Double ratePerSecond,
                      Object extra) throws IOException {
 
         if (rawTargets == null) {
@@ -184,28 +182,17 @@ public class ActiveScanner {
     }
 
     /**
-     * Host + Port als Target.
-     */
-    private static class HostPort {
-        final String host;
-        final int port;
-
-        HostPort(String host, int port) {
-            this.host = host;
-            this.port = port;
-        }
+         * Host + Port als Target.
+         */
+        private record HostPort(String host, int port) {
 
         @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (!(o instanceof HostPort hostPort)) return false;
-            return port == hostPort.port && Objects.equals(host, hostPort.host);
-        }
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (!(o instanceof HostPort hostPort)) return false;
+                return port == hostPort.port && Objects.equals(host, hostPort.host);
+            }
 
-        @Override
-        public int hashCode() {
-            return Objects.hash(host, port);
-        }
     }
 
     /**
@@ -303,7 +290,6 @@ public class ActiveScanner {
         private final Set<Long> allowedAsns;
 
         private final int randomSampleCount;
-        private final String sampleFromCidr;
 
         private final List<String> fullScanCountries;
         private final String countryBlocksCsvPath;
@@ -383,7 +369,6 @@ public class ActiveScanner {
             }
 
             this.randomSampleCount = (adv != null && adv.randomSampleCount != null) ? adv.randomSampleCount : 0;
-            this.sampleFromCidr = adv != null ? adv.sampleFromCidr : null;
 
             if (adv != null && adv.fullScanCountries != null && !adv.fullScanCountries.isEmpty()) {
                 List<String> tmp = new ArrayList<>();
@@ -542,7 +527,6 @@ public class ActiveScanner {
 
             boolean cityMode = !allowedCities.isEmpty();
             boolean asnMode = !allowedAsns.isEmpty() && !cityMode && allowedCountries.isEmpty();
-            boolean countryMode = !allowedCountries.isEmpty() && !cityMode && !asnMode;
 
             // -------------------- CITY MODE --------------------
             if (cityMode) {
@@ -1118,7 +1102,7 @@ public class ActiveScanner {
             cmd.add("--target-timeout");
             cmd.add(targetTimeoutSec + "s");
 
-            int senders = 2500; // oder z.B. 500, je nach Maschine/Bandbreite
+            int senders = 2500; // je nach Maschine/Bandbreite
 
             cmd.add("--senders");
             cmd.add(String.valueOf(senders));
@@ -1134,7 +1118,6 @@ public class ActiveScanner {
                 if (debug) {
                     System.err.println("[zgrab2] Konnte Blocklist-Datei nicht anlegen: " + e.getMessage());
                 }
-                // im Worst Case verwendet zgrab2 wieder das Default-Path-Handling
             }
 
             if (debug) {
@@ -1667,7 +1650,7 @@ public class ActiveScanner {
                     try {
                         AsnResponse aResp = asnDb.asn(addr);
                         if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
-                            asn = aResp.getAutonomousSystemNumber().longValue();
+                            asn = aResp.getAutonomousSystemNumber();
                         }
                     } catch (AddressNotFoundException ignored) {}
                 }

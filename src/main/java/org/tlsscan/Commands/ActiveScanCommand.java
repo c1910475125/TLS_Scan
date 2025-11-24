@@ -10,12 +10,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.Callable;
 
-/**
- * CLI-Command für den aktiven Scan.
- * - Unterstützt Geo-Länderscan (Random / Country-Full) via GeoLite2.
- * - Kann optional zgrab2 statt der internen Java-TLS-Engine nutzen.
- * - Geo-Länderscans werden immer über zgrab2 ausgeführt.
- */
+
 @Command(
         name = "scan",
         description = {
@@ -269,11 +264,9 @@ public class ActiveScanCommand implements Callable<Integer> {
                 rawTargets,
                 ports,
                 outputFile,
-                null,
                 debug,
                 DEFAULT_TIMEOUT_MS,
                 DEFAULT_CONCURRENCY,
-                null,
                 adv
         );
 

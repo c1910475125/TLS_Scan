@@ -322,7 +322,6 @@ public class Analyzer {
                 .mapToLong(Long::longValue)
                 .sum();
 
-        scoreByCountry.clear();
         if (totalForScore > 0) {
             for (Map.Entry<String, Long> e : countByCountryForScore.entrySet()) {
                 String country = e.getKey();
@@ -520,32 +519,6 @@ public class Analyzer {
 
         }
 
-    }
-
-    /**
-     * Wählt das Root-/Top-CA-Zertifikat:
-     * - Wenn nur eins vorhanden ist -> dieses.
-     * - Sonst: Zertifikat, dessen Issuer-DN NICHT als Subject-DN eines anderen Zertifikats vorkommt.
-     * - Fallback: irgendein Zertifikat aus der Menge.
-     */
-    private X509Certificate chooseRootCertificate(Set<X509Certificate> certsInLine) {
-        if (certsInLine == null || certsInLine.isEmpty()) return null;
-        if (certsInLine.size() == 1) return certsInLine.iterator().next();
-
-        for (X509Certificate candidate : certsInLine) {
-            boolean hasParent = false;
-            for (X509Certificate other : certsInLine) {
-                if (candidate == other) continue;
-                if (other.getSubjectX500Principal().equals(candidate.getIssuerX500Principal())) {
-                    hasParent = true;
-                    break;
-                }
-            }
-            if (!hasParent) {
-                return candidate;
-            }
-        }
-        return certsInLine.iterator().next();
     }
 
     private X509Certificate chooseLeafCertificate(Set<X509Certificate> certsInLine) {

@@ -23,10 +23,6 @@ import java.util.*;
 
 public final class Util {
 
-    private Util() {
-        // Utility-Klasse, keine Instanz
-    }
-
     // ==================== TLS-Versionen ====================
 
     /**
@@ -79,7 +75,6 @@ public final class Util {
         if (pk instanceof DSAPublicKey dsa) {
             return dsa.getY().bitLength();
         }
-        // andere Algorithmen lassen wir erstmal außen vor
         return null;
     }
 
@@ -168,12 +163,11 @@ public final class Util {
         if (s.contains("SHA1")) {
             return sigAlg + " verwendet SHA1 (nicht mehr als sicher eingestuft)";
         }
-        // ggf. weitere Regeln
         return sigAlg + " gilt in dieser Konfiguration als schwach";
     }
 
     public static class DeprecatedTlsFinding {
-        final String endpoint;     // z.B. "ip:port" oder Hostname
+        final String endpoint;
         final String tlsVersion;
         final String reason;
 

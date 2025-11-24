@@ -173,11 +173,9 @@ public class Main implements Callable<Integer> {
                     targets,
                     ports,
                     outputFile,
-                    null,
                     debug,
                     5000,
                     100,
-                    null,
                     adv
             );
         } catch (Exception e) {
@@ -283,11 +281,9 @@ public class Main implements Callable<Integer> {
                     Collections.emptyList(),
                     ports,
                     outputFile,
-                    null,
                     debug,
                     5000,
                     100,
-                    null,
                     adv
             );
         } catch (Exception e) {

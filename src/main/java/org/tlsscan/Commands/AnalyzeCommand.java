@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.concurrent.Callable;
 
+
 @Command(
         name = "analyze",
         description = "Analysiert JSONL (aus ct-stream / ct-poll / scan)."

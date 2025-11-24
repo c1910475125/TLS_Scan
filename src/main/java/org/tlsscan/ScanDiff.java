@@ -178,7 +178,7 @@ public class ScanDiff {
                     Integer bits = Util.extractKeySizeBits(pk);
                     if (bits != null) {
                         stats.keySizeCounts.merge(bits, 1L, Long::sum);
-                        if (keyAlg != null && Util.isWeakKeyLength(keyAlg, bits)) {
+                        if (Util.isWeakKeyLength(keyAlg, bits)) {
                             stats.weakKeyCount++;
                         }
                     }
@@ -192,7 +192,7 @@ public class ScanDiff {
                     }
                 }
 
-// --- Chain-Länge & schwache Chains (weak sig irgendwo) ---
+// --- Chain-Länge & schwache Chains ---
                 List<X509Certificate> fullChain = new ArrayList<>();
                 if (leafCert != null) fullChain.add(leafCert);
                 fullChain.addAll(chainCerts);
