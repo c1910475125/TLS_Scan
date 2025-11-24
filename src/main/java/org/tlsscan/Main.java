@@ -5,6 +5,7 @@ import org.tlsscan.Commands.AnalyzeCommand;
 import org.tlsscan.Commands.StoreScoreCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
+import org.tlsscan.Commands.CompareScanCommand;
 
 
 import java.nio.file.Files;
@@ -28,6 +29,7 @@ public class Main implements Callable<Integer> {
                     .addSubcommand("scan", new ActiveScanCommand())
                     .addSubcommand("analyze", new AnalyzeCommand())
                     .addSubcommand("store-score", new StoreScoreCommand())
+                    .addSubcommand("compare-scan", new CompareScanCommand())
                     .execute(args);
             System.exit(exit);
         } else {
@@ -75,14 +77,16 @@ public class Main implements Callable<Integer> {
             System.out.println("2) GeoLite-Scan (Country / City / ASN)");
             System.out.println("3) JSONL analysieren");
             System.out.println("4) TrustStore bewerten");
+            System.out.println("5) Scans vergleichen");
             System.out.println("0) Beenden");
 
-            String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4"), null);
+            String choice = readChoice(in, "Auswahl", Set.of("0", "1", "2", "3", "4", "5"), null);
             switch (choice) {
                 case "1" -> runIpScanInteractive(in);
                 case "2" -> runGeoScanInteractive(in);
                 case "3" -> runAnalyzeInteractive(in);
                 case "4" -> runStoreScoreInteractive(in);
+                case "5" -> runCompareScanInteractive(in);
                 case "0" -> {
                     System.out.println("Auf Wiedersehen.");
                     return;
@@ -416,6 +420,101 @@ public class Main implements Callable<Integer> {
             System.err.println("Fehler beim Bewerten des CA-Bundles: " + e.getMessage());
         }
     }
+
+    // --- 5) Scans vergleichen (Diff-Modus) -----------------------------------------
+
+    private static void runCompareScanInteractive(Scanner in) {
+        System.out.println("\n--- Scan-Vergleich (Diff-Modus) ---");
+        System.out.println("Basis-Ordner für Scans: " + defaultScanDir());
+        System.out.println("Hinweis: Dateinamen können relativ zu diesem Ordner oder absolut angegeben werden.\n");
+
+        String oldName = promptFree(
+                in,
+                "Ältere Scan-Datei (JSONL, z.B. at.jsonl)",
+                ""
+        );
+        if (oldName == null || oldName.isBlank()) {
+            System.out.println("Keine Datei angegeben – Abbruch.");
+            return;
+        }
+
+        String newName = promptFree(
+                in,
+                "Neuere Scan-Datei (JSONL, z.B. de.jsonl)",
+                ""
+        );
+        if (newName == null || newName.isBlank()) {
+            System.out.println("Keine Datei angegeben – Abbruch.");
+            return;
+        }
+
+        String summaryOutName = promptFree(
+                in,
+                "Optional: Diff-Summary-Output (JSON, leer = kein JSON-Output)",
+                ""
+        );
+
+        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
+
+        Path oldPath = resolveScanPath(oldName);
+        Path newPath = resolveScanPath(newName);
+
+        if (!Files.exists(oldPath)) {
+            System.err.println("Alte Scan-Datei existiert nicht: " + oldPath);
+            return;
+        }
+        if (!Files.exists(newPath)) {
+            System.err.println("Neue Scan-Datei existiert nicht: " + newPath);
+            return;
+        }
+
+        Path summaryOut = null;
+        if (summaryOutName != null && !summaryOutName.isBlank()) {
+            String name = summaryOutName.trim();
+            if (!name.toLowerCase(Locale.ROOT).endsWith(".json")) {
+                name += ".json";
+            }
+            summaryOut = defaultScanDir().resolve(name).normalize();
+            ensureDir(summaryOut.getParent());
+        }
+
+        System.out.println("\nVergleiche:");
+        System.out.println("  Alt : " + oldPath);
+        System.out.println("  Neu : " + newPath);
+        if (summaryOut != null) {
+            System.out.println("  Diff-JSON: " + summaryOut);
+        }
+
+        try {
+            ScanDiff diff = new ScanDiff();
+            diff.compare(
+                    oldPath,
+                    newPath,
+                    null,       // country_trustscores via Fallback-Ressource
+                    debug,
+                    summaryOut
+            );
+        } catch (Exception e) {
+            System.err.println("Fehler beim Scan-Vergleich: " + e.getMessage());
+            e.printStackTrace(System.err);
+        }
+    }
+
+    private static Path resolveScanPath(String input) {
+        String name = input.trim();
+
+        Path raw = Paths.get(name);
+        if (!raw.isAbsolute() && !name.toLowerCase(Locale.ROOT).endsWith(".jsonl")) {
+            name += ".jsonl";
+        }
+
+        Path p = Paths.get(name);
+        if (p.isAbsolute()) {
+            return p.normalize();
+        }
+        return defaultScanDir().resolve(p).normalize();
+    }
+
 
 
 
