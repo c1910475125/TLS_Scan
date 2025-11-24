@@ -1434,7 +1434,7 @@ public class ActiveScanner {
                                      BufferedWriter writer,
                                      AtomicLong counter,
                                      AtomicLong written,
-                                     Instant startTime) throws IOException {
+                                     Instant startTime) {
 
             InetAddress addr;
             try {
@@ -1456,8 +1456,8 @@ public class ActiveScanner {
             Socket plain = null;
             SSLSocket ssl = null;
 
-            String protocol = null;
-            String cipherSuite = null;
+            String protocol;
+            String cipherSuite;
             X509Certificate leaf = null;
             List<String> chainPem = new ArrayList<>();
 
@@ -1560,7 +1560,7 @@ public class ActiveScanner {
                     try {
                         AsnResponse aResp = asnDb.asn(addr);
                         if (aResp != null && aResp.getAutonomousSystemNumber() != null) {
-                            asn = aResp.getAutonomousSystemNumber().longValue();
+                            asn = aResp.getAutonomousSystemNumber();
                         }
                     } catch (AddressNotFoundException ignored) {}
                 }
