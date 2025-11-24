@@ -258,14 +258,6 @@ public class ActiveScanner {
          * Host + Port als Target.
          */
         private record HostPort(String host, int port) {
-
-        @Override
-            public boolean equals(Object o) {
-                if (this == o) return true;
-                if (!(o instanceof HostPort hostPort)) return false;
-                return port == hostPort.port && Objects.equals(host, hostPort.host);
-            }
-
     }
 
     /**
