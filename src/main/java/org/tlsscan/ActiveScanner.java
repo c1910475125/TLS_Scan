@@ -41,36 +41,23 @@ public class ActiveScanner {
     private final ObjectMapper mapper = new ObjectMapper();
     private final Random random = new Random();
 
-    /**
-     * Erweiterte Scan-Optionen.
-     */
-    public static class AdvancedScanOptions {
-        public String geoipCountryDbPath;
-        public String geoipAsnDbPath;
-        public String geoipCityDbPath;
-
-        public List<String> countryIsoCodes = new ArrayList<>();
-        public List<String> cityNames = new ArrayList<>();
-        public List<Long> asns = new ArrayList<>();
-
-        public Integer randomSampleCount = 0;
-        public String sampleFromCidr;
-
-        public boolean enableCountryFullScan = false;
-        public List<String> fullScanCountries = new ArrayList<>();
-        public String countryBlocksCsvPath;
-        public String countryLocationsCsvPath;
-
-        public String asnBlocksCsvPath;
-        public String cityBlocksCsvPath;
-        public String cityLocationsCsvPath;
-
-        // zgrab2-Integration
-        public boolean useZgrabOnly = false;
-        public String zgrabBinary = "zgrab2";
+    public ActiveScanner() {
     }
 
-    public ActiveScanner() {
+    private static boolean looksGlobalUnicast(String ip) {
+        String[] parts = ip.split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            int b1 = Integer.parseInt(parts[0]);
+            int b2 = Integer.parseInt(parts[1]);
+            if (b1 == 10) return false;
+            if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
+            if (b1 == 192 && b2 == 168) return false;
+            if (b1 == 127) return false;
+            return b1 < 224;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     /**
@@ -182,20 +169,6 @@ public class ActiveScanner {
     }
 
     /**
-         * Host + Port als Target.
-         */
-        private record HostPort(String host, int port) {
-
-        @Override
-            public boolean equals(Object o) {
-                if (this == o) return true;
-                if (!(o instanceof HostPort hostPort)) return false;
-                return port == hostPort.port && Objects.equals(host, hostPort.host);
-            }
-
-    }
-
-    /**
      * Einfache IPv4-CIDR-Erweiterung (begrenzte Hostanzahl).
      */
     private List<HostPort> expandCidrTargets(String cidr, List<Integer> ports, boolean debug) {
@@ -252,20 +225,47 @@ public class ActiveScanner {
         return o1 + "." + o2 + "." + o3 + "." + o4;
     }
 
-    private static boolean looksGlobalUnicast(String ip) {
-        String[] parts = ip.split("\\.");
-        if (parts.length != 4) return false;
-        try {
-            int b1 = Integer.parseInt(parts[0]);
-            int b2 = Integer.parseInt(parts[1]);
-            if (b1 == 10) return false;
-            if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
-            if (b1 == 192 && b2 == 168) return false;
-            if (b1 == 127) return false;
-            return b1 < 224;
-        } catch (NumberFormatException e) {
-            return false;
-        }
+    /**
+     * Erweiterte Scan-Optionen.
+     */
+    public static class AdvancedScanOptions {
+        public String geoipCountryDbPath;
+        public String geoipAsnDbPath;
+        public String geoipCityDbPath;
+
+        public List<String> countryIsoCodes = new ArrayList<>();
+        public List<String> cityNames = new ArrayList<>();
+        public List<Long> asns = new ArrayList<>();
+
+        public Integer randomSampleCount = 0;
+        public String sampleFromCidr;
+
+        public boolean enableCountryFullScan = false;
+        public List<String> fullScanCountries = new ArrayList<>();
+        public String countryBlocksCsvPath;
+        public String countryLocationsCsvPath;
+
+        public String asnBlocksCsvPath;
+        public String cityBlocksCsvPath;
+        public String cityLocationsCsvPath;
+
+        // zgrab2-Integration
+        public boolean useZgrabOnly = false;
+        public String zgrabBinary = "zgrab2";
+    }
+
+    /**
+         * Host + Port als Target.
+         */
+        private record HostPort(String host, int port) {
+
+        @Override
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (!(o instanceof HostPort hostPort)) return false;
+                return port == hostPort.port && Objects.equals(host, hostPort.host);
+            }
+
     }
 
     /**
