@@ -150,6 +150,8 @@ public class ActiveScanner {
 
                 if (adv.cityNames != null && !adv.cityNames.isEmpty()) {
                     fullTargets = scanner.buildCityFullTargets(ports);
+                } else if (adv.asns != null && !adv.asns.isEmpty()) {
+                    fullTargets = scanner.buildAsnFullTargets(ports);
                 } else {
                     fullTargets = scanner.buildCountryFullTargets(ports);
                 }
@@ -874,6 +876,88 @@ public class ActiveScanner {
                     out.size());
             return out;
         }
+
+        List<HostPort> buildAsnFullTargets(List<Integer> ports) {
+            List<HostPort> out = new ArrayList<>();
+
+            if (asnBlocksCsvPath == null) {
+                System.err.println("[AsnFullScan] Keine ASN-Blocks-CSV konfiguriert – Vollscan nicht möglich.");
+                return out;
+            }
+
+            Path blocksPath = Path.of(asnBlocksCsvPath);
+            if (!Files.exists(blocksPath)) {
+                System.err.println("[AsnFullScan] ASN-Blocks-CSV fehlt: " + blocksPath);
+                return out;
+            }
+
+            boolean filterEnabled = !allowedAsns.isEmpty();
+            long countBlocks = 0;
+
+            try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
+                String header = br.readLine();
+                if (header != null) {
+                    String[] cols = header.split(",", -1);
+                    int idxNetwork = indexOf(cols, "network");
+                    int idxAsn = indexOf(cols, "autonomous_system_number");
+
+                    if (idxNetwork < 0 || idxAsn < 0) {
+                        System.err.println("[AsnFullScan] CSV hat keine network/autonomous_system_number Spalten.");
+                        return out;
+                    }
+
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        if (line.isBlank()) continue;
+                        String[] f = line.split(",", -1);
+                        if (f.length <= Math.max(idxNetwork, idxAsn)) continue;
+
+                        String network = f[idxNetwork].trim();
+                        if (network.isEmpty()) continue;
+                        if (network.contains(":")) continue; // nur IPv4
+
+                        String asnStr = f[idxAsn].trim();
+                        if (asnStr.isEmpty()) continue;
+
+                        long asn;
+                        try {
+                            asn = Long.parseLong(asnStr);
+                        } catch (NumberFormatException e) {
+                            continue;
+                        }
+
+                        if (filterEnabled && !allowedAsns.contains(asn)) {
+                            continue;
+                        }
+
+                        countBlocks++;
+
+                        String baseIp = network;
+                        int slashIdx = network.indexOf('/');
+                        if (slashIdx > 0) {
+                            baseIp = network.substring(0, slashIdx);
+                        }
+                        if (!looksGlobalUnicast(baseIp)) continue;
+
+                        for (int p : ports) {
+                            out.add(new HostPort(baseIp, p));
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("[AsnFullScan] Fehler beim Lesen ASN-Blocks-CSV: " + e.getMessage());
+                return out;
+            }
+
+            System.out.printf(Locale.ROOT,
+                    "[AsnFullScan] ASNfilter=%s, Blöcke=%d, Ziele=%d%n",
+                    filterEnabled ? allowedAsns : "ALLE",
+                    countBlocks,
+                    out.size());
+
+            return out;
+        }
+
 
         List<HostPort> buildCityFullTargets(List<Integer> ports) {
             List<HostPort> out = new ArrayList<>();
