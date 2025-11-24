@@ -538,58 +538,193 @@ public class ActiveScanner {
         private List<String> buildRandomIpPoolFromCsv() {
             LinkedHashSet<String> pool = new LinkedHashSet<>();
 
-            // Country-CSV (Blocks + Locations)
+            boolean cityMode = !allowedCities.isEmpty();
+            boolean asnMode = !allowedAsns.isEmpty() && !cityMode && allowedCountries.isEmpty();
+            boolean countryMode = !allowedCountries.isEmpty() && !cityMode && !asnMode;
+
+            // -------------------- CITY MODE --------------------
+            if (cityMode) {
+                if (debug) {
+                    System.out.println("[RandomPool] City-Modus aktiv -> Pool nur aus City-Blocks-CSV.");
+                }
+
+                if (cityBlocksCsvPath == null) {
+                    if (debug) System.err.println("[RandomPool] City-Blocks-CSV nicht konfiguriert.");
+                    return new ArrayList<>();
+                }
+
+                Path blocksPath = Path.of(cityBlocksCsvPath);
+                if (!Files.exists(blocksPath)) {
+                    if (debug) System.err.println("[RandomPool] City-Blocks-CSV fehlt: " + blocksPath);
+                    return new ArrayList<>();
+                }
+
+                Map<String, String> geoIdToCity = loadCityGeoIdToName();
+
+                try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
+                    String header = br.readLine();
+                    if (header != null) {
+                        String[] cols = header.split(",", -1);
+                        int idxNetwork = indexOf(cols, "network");
+                        int idxGeo = indexOf(cols, "geoname_id");
+
+                        if (idxNetwork >= 0 && idxGeo >= 0) {
+                            String line;
+                            while ((line = br.readLine()) != null) {
+                                if (line.isBlank()) continue;
+                                String[] f = line.split(",", -1);
+                                if (f.length <= Math.max(idxNetwork, idxGeo)) continue;
+
+                                String network = f[idxNetwork].trim();
+                                if (network.isEmpty()) continue;
+                                if (network.contains(":")) continue; // nur IPv4
+
+                                String geoId = f[idxGeo].trim();
+                                if (geoId.isEmpty()) continue;
+
+                                String cityName = geoIdToCity.get(geoId); // bereits lowercase
+                                if (cityName == null) continue;
+
+                                // City-Whitelist anwenden
+                                if (!allowedCities.contains(cityName)) continue;
+
+                                String baseIp = network;
+                                int slashIdx = network.indexOf('/');
+                                if (slashIdx > 0) baseIp = network.substring(0, slashIdx);
+
+                                if (!looksGlobalUnicast(baseIp)) continue;
+                                pool.add(baseIp);
+                            }
+                        } else if (debug) {
+                            System.err.println("[RandomPool] City-Blocks-CSV hat keine network/geoname_id Spalten.");
+                        }
+                    }
+                } catch (IOException e) {
+                    if (debug) {
+                        System.err.println("[RandomPool] City-Blocks-CSV: " + e.getMessage());
+                    }
+                }
+
+                List<String> list = new ArrayList<>(pool);
+                System.out.printf(Locale.ROOT,
+                        "[RandomPool] City-Pool Städte=%s, Größe=%,d%n",
+                        allowedCities, list.size());
+                return list;
+            }
+
+            // -------------------- ASN MODE --------------------
+            if (asnMode) {
+                if (debug) {
+                    System.out.println("[RandomPool] ASN-Modus aktiv -> Pool nur aus ASN-Blocks-CSV.");
+                }
+
+                if (asnBlocksCsvPath == null) {
+                    if (debug) System.err.println("[RandomPool] ASN-Blocks-CSV nicht konfiguriert.");
+                    return new ArrayList<>();
+                }
+
+                Path blocksPath = Path.of(asnBlocksCsvPath);
+                if (Files.exists(blocksPath)) {
+                    try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
+                        String header = br.readLine();
+                        if (header != null) {
+                            String[] cols = header.split(",", -1);
+                            int idxNetwork = indexOf(cols, "network");
+                            int idxAsn = indexOf(cols, "autonomous_system_number");
+
+                            if (idxNetwork >= 0 && idxAsn >= 0) {
+                                String line;
+                                while ((line = br.readLine()) != null) {
+                                    if (line.isBlank()) continue;
+                                    String[] f = line.split(",", -1);
+                                    if (f.length <= Math.max(idxNetwork, idxAsn)) continue;
+
+                                    String network = f[idxNetwork].trim();
+                                    if (network.isEmpty()) continue;
+                                    if (network.contains(":")) continue; // nur IPv4
+
+                                    String asnStr = f[idxAsn].trim();
+                                    if (asnStr.isEmpty()) continue;
+
+                                    long asn;
+                                    try {
+                                        asn = Long.parseLong(asnStr);
+                                    } catch (NumberFormatException e) {
+                                        continue;
+                                    }
+
+                                    if (!allowedAsns.contains(asn)) continue;
+
+                                    String baseIp = network;
+                                    int slashIdx = network.indexOf('/');
+                                    if (slashIdx > 0) baseIp = network.substring(0, slashIdx);
+
+                                    if (!looksGlobalUnicast(baseIp)) continue;
+                                    pool.add(baseIp);
+                                }
+                            } else if (debug) {
+                                System.err.println("[RandomPool] ASN-Blocks-CSV hat keine network/autonomous_system_number Spalten.");
+                            }
+                        }
+                    } catch (IOException e) {
+                        if (debug) {
+                            System.err.println("[RandomPool] ASN-Blocks-CSV: " + e.getMessage());
+                        }
+                    }
+                }
+
+                List<String> list = new ArrayList<>(pool);
+                System.out.printf(Locale.ROOT,
+                        "[RandomPool] ASN-Pool ASNs=%s, Größe=%,d%n",
+                        allowedAsns, list.size());
+                return list;
+            }
+
+            // -------------------- COUNTRY MODE (oder NO FILTER) --------------------
             if (countryBlocksCsvPath != null) {
                 Path blocksPath = Path.of(countryBlocksCsvPath);
                 if (Files.exists(blocksPath)) {
                     Map<String, String> geoIdToIso = loadCountryGeoIdToIso();
-                    Set<String> allowed = allowedCountries.isEmpty() ? null : allowedCountries;
+                    Set<String> wanted = allowedCountries.isEmpty() ? null : allowedCountries;
 
                     try (BufferedReader br = Files.newBufferedReader(blocksPath, StandardCharsets.UTF_8)) {
                         String header = br.readLine();
                         if (header != null) {
                             String[] cols = header.split(",", -1);
                             int idxNetwork = indexOf(cols, "network");
-                            int idxRegGeo = indexOf(cols, "registered_country_geoname_id");
-                            int idxGeo = indexOf(cols, "geoname_id");
-                            if (idxNetwork >= 0) {
+                            int idxRegGeo  = indexOf(cols, "registered_country_geoname_id");
+                            int idxGeo     = indexOf(cols, "geoname_id");
+
+                            if (idxNetwork >= 0 && (idxRegGeo >= 0 || idxGeo >= 0)) {
                                 String line;
                                 while ((line = br.readLine()) != null) {
                                     if (line.isBlank()) continue;
                                     String[] f = line.split(",", -1);
-                                    if (f.length <= idxNetwork) continue;
+
+                                    int useGeoIdx = (idxRegGeo >= 0) ? idxRegGeo : idxGeo;
+                                    if (f.length <= Math.max(idxNetwork, useGeoIdx)) continue;
 
                                     String network = f[idxNetwork].trim();
                                     if (network.isEmpty()) continue;
-                                    if (network.contains(":")) continue;
+                                    if (network.contains(":")) continue; // nur IPv4
 
-                                    String geoId = null;
-                                    if (idxRegGeo >= 0 && idxRegGeo < f.length && !f[idxRegGeo].trim().isEmpty()) {
-                                        geoId = f[idxRegGeo].trim();
-                                    } else if (idxGeo >= 0 && idxGeo < f.length && !f[idxGeo].trim().isEmpty()) {
-                                        geoId = f[idxGeo].trim();
-                                    }
+                                    String geoId = f[useGeoIdx].trim();
 
                                     String iso = null;
-                                    if (geoId != null && !geoIdToIso.isEmpty()) {
+                                    if (!geoId.isEmpty() && !geoIdToIso.isEmpty()) {
                                         iso = geoIdToIso.get(geoId);
                                         if (iso != null) iso = iso.toUpperCase(Locale.ROOT);
                                     }
 
-                                    if (allowed != null && iso != null && !allowed.contains(iso)) {
-                                        continue;
-                                    }
-                                    if (allowed != null && iso == null) {
-                                        continue;
+                                    if (wanted != null) {
+                                        if (iso == null || !wanted.contains(iso)) continue;
                                     }
 
                                     String baseIp = network;
                                     int slashIdx = network.indexOf('/');
-                                    if (slashIdx > 0) {
-                                        baseIp = network.substring(0, slashIdx);
-                                    }
-                                    if (!looksGlobalUnicast(baseIp)) continue;
+                                    if (slashIdx > 0) baseIp = network.substring(0, slashIdx);
 
+                                    if (!looksGlobalUnicast(baseIp)) continue;
                                     pool.add(baseIp);
                                 }
                             }
@@ -602,66 +737,18 @@ public class ActiveScanner {
                 }
             }
 
-
-            // ASN-CSV: nur falls ASN-Filter aktiv
-            if (asnBlocksCsvPath != null && !allowedAsns.isEmpty()) {
-                Path asnPath = Path.of(asnBlocksCsvPath);
-                if (Files.exists(asnPath)) {
-                    try (BufferedReader br = Files.newBufferedReader(asnPath, StandardCharsets.UTF_8)) {
-                        String header = br.readLine();
-                        if (header != null) {
-                            String[] cols = header.split(",", -1);
-                            int idxNetwork = indexOf(cols, "network");
-                            int idxAsn = indexOf(cols, "autonomous_system_number");
-                            if (idxNetwork >= 0 && idxAsn >= 0) {
-                                String line;
-                                while ((line = br.readLine()) != null) {
-                                    if (line.isBlank()) continue;
-                                    String[] f = line.split(",", -1);
-                                    if (f.length <= Math.max(idxNetwork, idxAsn)) continue;
-
-                                    String network = f[idxNetwork].trim();
-                                    String asnStr = f[idxAsn].trim();
-                                    if (network.isEmpty() || asnStr.isEmpty()) continue;
-                                    if (network.contains(":")) continue;
-
-                                    long asn;
-                                    try {
-                                        asn = Long.parseLong(asnStr);
-                                    } catch (NumberFormatException e) {
-                                        continue;
-                                    }
-                                    if (!allowedAsns.contains(asn)) continue;
-
-                                    String baseIp = network;
-                                    int slashIdx = network.indexOf('/');
-                                    if (slashIdx > 0) {
-                                        baseIp = network.substring(0, slashIdx);
-                                    }
-                                    if (!looksGlobalUnicast(baseIp)) continue;
-
-                                    pool.add(baseIp);
-                                }
-                            }
-                        }
-                    } catch (IOException e) {
-                        if (debug) {
-                            System.err.println("[RandomPool] ASN-Blocks-CSV: " + e.getMessage());
-                        }
-                    }
-                }
-            }
-
             List<String> list = new ArrayList<>(pool);
             if (!list.isEmpty()) {
                 System.out.printf(Locale.ROOT,
-                        "[RandomPool] Gesamt-Poolgröße aus CSVs: %,d%n",
+                        "[RandomPool] Country-Pool Länder=%s, Größe=%,d%n",
+                        allowedCountries.isEmpty() ? "ALLE" : allowedCountries,
                         list.size());
             } else {
                 System.out.println("[RandomPool] Achtung: CSV-Pool ist leer – keine Zufallsziele möglich.");
             }
             return list;
         }
+
 
         /**
          * Zufallsstichprobe N IPs aus dem über CSV aufgebauten Pool.
@@ -1107,8 +1194,8 @@ public class ActiveScanner {
                     if (leafCert != null) {
                         issuerDn = leafCert.getIssuerX500Principal().getName();
                         subjectDn = leafCert.getSubjectX500Principal().getName();
-                        issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
-                        subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
+                        issuerCountry = Util.extractCountryFromDn(issuerDn);
+                        subjectCountry = Util.extractCountryFromDn(subjectDn);
                     }
                 }
             } catch (Exception e) {
@@ -1164,7 +1251,7 @@ public class ActiveScanner {
                 return null;
             }
 
-            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
+            Util.ScanLogData logData = new Util.ScanLogData(
                     ip,
                     port,
                     ip,
@@ -1180,7 +1267,7 @@ public class ActiveScanner {
                     leafPem,
                     chainPem
             );
-            return ScanLogUtil.buildLogEntry(mapper, "active_scan", logData);
+            return Util.buildLogEntry(mapper, "active_scan", logData);
         }
 
         private String derBase64ToPem(String rawB64) {
@@ -1331,7 +1418,7 @@ public class ActiveScanner {
                     leaf = (X509Certificate) peer[0];
                     for (Certificate c : peer) {
                         if (c instanceof X509Certificate) {
-                            String pem = ScanLogUtil.certToPem((X509Certificate) c);
+                            String pem = Util.certToPem((X509Certificate) c);
                             if (pem != null) {
                                 chainPem.add(pem);
                             }
@@ -1362,8 +1449,8 @@ public class ActiveScanner {
                 try {
                     issuerDn = leaf.getIssuerX500Principal().getName();
                     subjectDn = leaf.getSubjectX500Principal().getName();
-                    issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
-                    subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
+                    issuerCountry = Util.extractCountryFromDn(issuerDn);
+                    subjectCountry = Util.extractCountryFromDn(subjectDn);
                 } catch (Exception e) {
                     if (debug) {
                         System.err.println("[ActiveScan] DN/Länder-Fehler für " + hp.host + ":" + hp.port + " -> " + e.getMessage());
@@ -1416,9 +1503,9 @@ public class ActiveScanner {
                 }
             }
 
-            String leafPem = ScanLogUtil.certToPem(leaf);
+            String leafPem = Util.certToPem(leaf);
 
-            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
+            Util.ScanLogData logData = new Util.ScanLogData(
                     ipStr,
                     hp.port,
                     hp.host,
@@ -1437,7 +1524,7 @@ public class ActiveScanner {
 
             try {
                 String json = mapper.writeValueAsString(
-                        ScanLogUtil.buildLogEntry(mapper, "active_scan", logData)
+                        Util.buildLogEntry(mapper, "active_scan", logData)
                 );
                 synchronized (writer) {
                     writer.write(json);

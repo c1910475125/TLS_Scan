@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.KeyStore;
+import java.security.PublicKey;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -216,8 +217,8 @@ public class StoreScorer {
                                    boolean debug) throws IOException {
 
         Map<String, Double> countryScores =
-                CountryTrustUtil.normalizeScores(
-                        CountryTrustUtil.loadCountryScoresWithFallback(countryScoresPath)
+                Util.normalizeScores(
+                        Util.loadCountryScoresWithFallback(countryScoresPath)
                 );
 
         Map<String, Long> countByCountry = new HashMap<>();
@@ -259,15 +260,15 @@ public class StoreScorer {
                 try {
                     issuerDn = cert.getIssuerX500Principal().getName();
                     subjectDn = cert.getSubjectX500Principal().getName();
-                    issuerCountry = CountryTrustUtil.extractCountryFromDn(issuerDn);
-                    subjectCountry = CountryTrustUtil.extractCountryFromDn(subjectDn);
+                    issuerCountry = Util.extractCountryFromDn(issuerDn);
+                    subjectCountry = Util.extractCountryFromDn(subjectDn);
                 } catch (Exception e) {
                     if (debug) {
                         System.err.println("[StoreScorer] DN/Land konnte nicht ermittelt werden: " + e.getMessage());
                     }
                 }
 
-                java.security.PublicKey pk = cert.getPublicKey();
+                PublicKey pk = cert.getPublicKey();
                 String keyAlg = (pk != null ? pk.getAlgorithm() : null);
                 if (keyAlg != null) {
                     keyAlgorithmCounts.merge(keyAlg, 1L, Long::sum);
@@ -294,7 +295,7 @@ public class StoreScorer {
                 String bcKey = (bc >= 0) ? "CA" : "EndEntity/Unknown";
                 basicConstraintsCounts.merge(bcKey, 1L, Long::sum);
 
-                CountryTrustUtil.updateCountryCountersForCert(
+                Util.updateCountryCountersForCert(
                         cert,
                         countByCountry,
                         countByCountryForScore,
@@ -310,7 +311,7 @@ public class StoreScorer {
                             subjectDn,
                             issuerCountry,
                             subjectCountry,
-                            ScanLogUtil.certToPem(cert)
+                            Util.certToPem(cert)
                     );
                 }
             }
@@ -448,7 +449,7 @@ public class StoreScorer {
     ) {
         try {
             String sourceName = (storePath != null) ? storePath.toString() : storeType;
-            ScanLogUtil.ScanLogData logData = new ScanLogUtil.ScanLogData(
+            Util.ScanLogData logData = new Util.ScanLogData(
                     null,
                     null,
                     sourceName,
@@ -466,7 +467,7 @@ public class StoreScorer {
             );
 
             String json = mapper.writeValueAsString(
-                    ScanLogUtil.buildLogEntry(mapper, "store_score", logData)
+                    Util.buildLogEntry(mapper, "store_score", logData)
             );
             jsonWriter.write(json);
             jsonWriter.newLine();

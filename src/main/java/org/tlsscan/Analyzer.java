@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.tlsscan.RevocationUtil.RevocationStatus;
+import org.tlsscan.Util.RevocationStatus;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -15,7 +15,6 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
 
-import static org.tlsscan.RevocationUtil.checkRevocation;
 
 
 public class Analyzer {
@@ -28,8 +27,8 @@ public class Analyzer {
                         Path summaryOutput) throws IOException {
 
         final Map<String, Double> countryScores =
-                CountryTrustUtil.normalizeScores(
-                        CountryTrustUtil.loadCountryScoresWithFallback(countryScoresPath)
+                Util.normalizeScores(
+                        Util.loadCountryScoresWithFallback(countryScoresPath)
                 );
 
         long lines = 0;
@@ -214,7 +213,7 @@ public class Analyzer {
                                 leafWithEmbeddedSct++;
                             }
 
-                            RevocationStatus status = checkRevocation(
+                            RevocationStatus status = Util.checkRevocation(
                                     leafCert,
                                     chainCerts,
                                     debug
@@ -304,7 +303,7 @@ public class Analyzer {
 
                 certs++;
 
-                CountryTrustUtil.updateCountryCountersForCert(
+                Util.updateCountryCountersForCert(
                         selected,
                         countByCountry,
                         countByCountryForScore,
