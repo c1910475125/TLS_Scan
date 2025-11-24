@@ -43,7 +43,7 @@ public class AnalyzeCommand implements Callable<Integer> {
         Analyzer analyzer = new Analyzer();
         analyzer.analyze(
                 inPath,
-                null,
+                scoresFile,
                 debug,
                 summaryOutput
         );

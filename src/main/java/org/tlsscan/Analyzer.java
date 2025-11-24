@@ -68,7 +68,6 @@ public class Analyzer {
         long weakKeyCount = 0L;
 
         Map<String, Long> signatureAlgorithmCounts = new HashMap<>();
-        long weakSignatureAlgoCount = 0L;
 
         Map<Integer, Long> chainLengthCounts = new HashMap<>();
         long chainsWithWeakSig = 0L; // z.B. SHA1/MD5 irgendwo in der Kette
@@ -101,7 +100,7 @@ public class Analyzer {
                             if (Util.isDeprecatedTlsVersion(tlsVersion)) {
                                 deprecatedTlsVersionCounts.merge(tlsVersion, 1L, Long::sum);
 
-                                String endpoint = Util.extractEndpointFromRecord(dataNode); // Pseudocode, unten Kommentar
+                                String endpoint = Util.extractEndpointFromRecord(dataNode);
 
                                 String reason = "Verwendung veralteter TLS-Version " + tlsVersion;
 
@@ -130,7 +129,7 @@ public class Analyzer {
                             String leafPem = leafPemNode.asText();
                             Set<X509Certificate> tmp = new LinkedHashSet<>();
                             // vorhandene Helfer wiederverwenden:
-                            parsePemCertificates(leafPem, cf, tmp, debug);
+                            Util.parsePemCertificates(leafPem, cf, tmp, debug, "Analyzer");
                             if (!tmp.isEmpty()) {
                                 leafCert = tmp.iterator().next();
                             }
@@ -144,7 +143,7 @@ public class Analyzer {
                                 if (!cNode.isTextual()) continue;
                                 String pem = cNode.asText();
                                 Set<X509Certificate> tmp = new LinkedHashSet<>();
-                                parsePemCertificates(pem, cf, tmp, debug);
+                                Util.parsePemCertificates(pem, cf, tmp, debug, "Analyzer");
                                 chainCerts.addAll(tmp);
                             }
                         }
@@ -185,7 +184,6 @@ public class Analyzer {
                             if (sigAlg != null && !sigAlg.isBlank()) {
                                 signatureAlgorithmCounts.merge(sigAlg, 1L, Long::sum);
                                 if (Util.isWeakSignatureAlgorithm(sigAlg)) {
-                                    weakSignatureAlgoCount++;
 
                                     String subject = leafCert.getSubjectX500Principal().getName();
                                     String issuer  = leafCert.getIssuerX500Principal().getName();
@@ -258,7 +256,7 @@ public class Analyzer {
                 }
 
                 Set<X509Certificate> certsInLine = new HashSet<>();
-                extractCertificatesRecursive(root, cf, certsInLine, debug);
+                Util.extractCertificatesRecursive(root, cf, certsInLine, debug, "Analyzer");
                 if (certsInLine.isEmpty()) continue;
                 certs++;
 
@@ -298,7 +296,7 @@ public class Analyzer {
                 }
 
                 // Root-/CA-Land für TrustScore-Bewertung bestimmen
-                X509Certificate selected = chooseRootCertificate(certsInLine);
+                X509Certificate selected = Util.chooseRootCertificate(certsInLine);
                 if (selected == null) continue;
 
                 certs++;
@@ -548,81 +546,6 @@ public class Analyzer {
             }
         }
         return certsInLine.iterator().next();
-    }
-
-    private void extractCertificatesRecursive(JsonNode node,
-                                              CertificateFactory cf,
-                                              Set<X509Certificate> out,
-                                              boolean debug) {
-        if (node == null || node.isNull()) return;
-
-        if (node.isTextual()) {
-            String text = node.asText();
-            if (text.contains("-----BEGIN CERTIFICATE-----")) {
-                parsePemCertificates(text, cf, out, debug);
-                return;
-            }
-            String trimmed = text.trim();
-            if (trimmed.length() >= 100 && looksLikeBase64(trimmed)) {
-                tryDecodeCertificate(trimmed, cf, out, debug);
-            }
-            return;
-        }
-
-        if (node.isArray()) {
-            for (JsonNode child : node) {
-                extractCertificatesRecursive(child, cf, out, debug);
-            }
-            return;
-        }
-
-        if (node.isObject()) {
-            node.fields().forEachRemaining(entry ->
-                    extractCertificatesRecursive(entry.getValue(), cf, out, debug));
-        }
-    }
-
-    private void parsePemCertificates(String pem,
-                                      CertificateFactory cf,
-                                      Set<X509Certificate> out,
-                                      boolean debug) {
-        String[] parts = pem.split("-----END CERTIFICATE-----");
-        for (String part : parts) {
-            if (!part.contains("-----BEGIN CERTIFICATE-----")) continue;
-            String body = part.substring(part.indexOf("-----BEGIN CERTIFICATE-----")
-                            + "-----BEGIN CERTIFICATE-----".length())
-                    .replaceAll("\\s+", "");
-            tryDecodeCertificate(body, cf, out, debug);
-        }
-    }
-
-    private void tryDecodeCertificate(String b64,
-                                      CertificateFactory cf,
-                                      Set<X509Certificate> out,
-                                      boolean debug) {
-        try {
-            byte[] der = Base64.getDecoder().decode(b64);
-            X509Certificate cert = (X509Certificate) cf.generateCertificate(
-                    new java.io.ByteArrayInputStream(der));
-            out.add(cert);
-        } catch (IllegalArgumentException | CertificateException e) {
-            if (debug) {
-                System.err.println("[Analyzer] Zertifikat konnte nicht dekodiert werden: " + e.getMessage());
-            }
-        }
-    }
-
-    private boolean looksLikeBase64(String s) {
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (!(c >= 'A' && c <= 'Z') &&
-                    !(c >= 'a' && c <= 'z') &&
-                    !(c >= '0' && c <= '9') &&
-                    c != '+' && c != '/' && c != '=') {
-                return false;
-            }
-        }
-        return true;
     }
 
     private X509Certificate chooseLeafCertificate(Set<X509Certificate> certsInLine) {

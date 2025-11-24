@@ -14,14 +14,6 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.*;
 
-/**
- * Vergleicht zwei Scan-JSONL-Dateien (historischer Diff).
- *
- * - Liest beide JSONL-Dateien ähnlich wie Analyzer
- * - Aggregiert TLS-Versionen und Root-CA-Länder inkl. TrustScore
- * - Verknüpft pro Endpoint (ip/hostname:port) TLS-Version + Root-Zertifikat
- *   und erkennt so Chain-/Root-Wechsel.
- */
 public class ScanDiff {
 
     private final ObjectMapper mapper = new ObjectMapper();
@@ -40,7 +32,7 @@ public class ScanDiff {
         ScanStats oldStats = computeStats(oldJsonl, countryScores, debug);
         ScanStats newStats = computeStats(newJsonl, countryScores, debug);
 
-        printHumanReadableDiff(oldJsonl, newJsonl, oldStats, newStats, countryScores);
+        printHumanReadableDiff(oldJsonl, newJsonl, oldStats, newStats);
 
         if (summaryOutput != null) {
             writeDiffJson(summaryOutput, oldJsonl, newJsonl, oldStats, newStats);
@@ -49,27 +41,11 @@ public class ScanDiff {
 
     // --------------------------- Stats-Model ----------------------------
 
-    public static class EndpointInfo {
-        public final String endpoint;      // ip/hostname[:port]
-        public final String tlsVersion;
-        public final String cipherSuite;
-        public final String rootCountry;
-        public final String rootSubjectDn;
-        public final String rootIssuerDn;
-
-        public EndpointInfo(String endpoint,
-                            String tlsVersion,
-                            String cipherSuite,
-                            String rootCountry,
-                            String rootSubjectDn,
-                            String rootIssuerDn) {
-            this.endpoint = endpoint;
-            this.tlsVersion = tlsVersion;
-            this.cipherSuite = cipherSuite;
-            this.rootCountry = rootCountry;
-            this.rootSubjectDn = rootSubjectDn;
-            this.rootIssuerDn = rootIssuerDn;
-        }
+    /**
+     * @param endpoint ip/hostname[:port]
+     */
+    public record EndpointInfo(String endpoint, String tlsVersion, String cipherSuite, String rootCountry,
+                               String rootSubjectDn, String rootIssuerDn) {
     }
 
     public static class ScanStats {
@@ -172,7 +148,7 @@ public class ScanDiff {
                     String leafPem = dataNode.path("leaf_cert").path("pem").asText(null);
                     if (leafPem != null && !leafPem.isBlank()) {
                         Set<X509Certificate> tmp = new LinkedHashSet<>();
-                        parsePemCertificates(leafPem, cf, tmp, debug);
+                        Util.parsePemCertificates(leafPem, cf, tmp, debug, "ScanDiff");
                         if (!tmp.isEmpty()) {
                             leafCert = tmp.iterator().next();
                         }
@@ -185,7 +161,7 @@ public class ScanDiff {
                             String pem = cNode.asText();
                             if (pem == null || pem.isBlank()) continue;
                             Set<X509Certificate> tmp = new LinkedHashSet<>();
-                            parsePemCertificates(pem, cf, tmp, debug);
+                            Util.parsePemCertificates(pem, cf, tmp, debug, "ScanDiff");
                             chainCerts.addAll(tmp);
                         }
                     }
@@ -250,7 +226,7 @@ public class ScanDiff {
                 if (!certsForRoot.isEmpty()) {
                     stats.chains++;
 
-                    X509Certificate rootCert = chooseRootCertificate(certsForRoot);
+                    X509Certificate rootCert = Util.chooseRootCertificate(certsForRoot);
                     if (rootCert != null) {
                         Util.updateCountryCountersForCert(
                                 rootCert,
@@ -315,8 +291,7 @@ public class ScanDiff {
     private void printHumanReadableDiff(Path oldFile,
                                         Path newFile,
                                         ScanStats oldStats,
-                                        ScanStats newStats,
-                                        Map<String, Double> countryScores) {
+                                        ScanStats newStats) {
 
         System.out.println("=== Scan-Diff ===");
         System.out.println("Alt: " + oldFile);
@@ -769,102 +744,5 @@ public class ScanDiff {
         }
         mapper.writerWithDefaultPrettyPrinter().writeValue(out.toFile(), root);
         System.out.println("Diff-JSON gespeichert in: " + out);
-    }
-
-    // --------------------------- Zertifikat-Helper (aus Analyzer übernommen) ----------------------------
-
-    private X509Certificate chooseRootCertificate(Set<X509Certificate> certsInLine) {
-        if (certsInLine == null || certsInLine.isEmpty()) return null;
-        if (certsInLine.size() == 1) return certsInLine.iterator().next();
-
-        for (X509Certificate candidate : certsInLine) {
-            boolean hasParent = false;
-            for (X509Certificate other : certsInLine) {
-                if (candidate == other) continue;
-                if (other.getSubjectX500Principal().equals(candidate.getIssuerX500Principal())) {
-                    hasParent = true;
-                    break;
-                }
-            }
-            if (!hasParent) {
-                return candidate;
-            }
-        }
-        return certsInLine.iterator().next();
-    }
-
-    private void extractCertificatesRecursive(JsonNode node,
-                                              CertificateFactory cf,
-                                              Set<X509Certificate> out,
-                                              boolean debug) {
-        if (node == null || node.isNull()) return;
-
-        if (node.isTextual()) {
-            String text = node.asText();
-            if (text.contains("-----BEGIN CERTIFICATE-----")) {
-                parsePemCertificates(text, cf, out, debug);
-                return;
-            }
-            String trimmed = text.trim();
-            if (trimmed.length() >= 100 && looksLikeBase64(trimmed)) {
-                tryDecodeCertificate(trimmed, cf, out, debug);
-            }
-            return;
-        }
-
-        if (node.isArray()) {
-            for (JsonNode child : node) {
-                extractCertificatesRecursive(child, cf, out, debug);
-            }
-            return;
-        }
-
-        if (node.isObject()) {
-            node.fields().forEachRemaining(entry ->
-                    extractCertificatesRecursive(entry.getValue(), cf, out, debug));
-        }
-    }
-
-    private void parsePemCertificates(String pem,
-                                      CertificateFactory cf,
-                                      Set<X509Certificate> out,
-                                      boolean debug) {
-        String[] parts = pem.split("-----END CERTIFICATE-----");
-        for (String part : parts) {
-            if (!part.contains("-----BEGIN CERTIFICATE-----")) continue;
-            String body = part.substring(part.indexOf("-----BEGIN CERTIFICATE-----")
-                            + "-----BEGIN CERTIFICATE-----".length())
-                    .replaceAll("\\s+", "");
-            tryDecodeCertificate(body, cf, out, debug);
-        }
-    }
-
-    private void tryDecodeCertificate(String b64,
-                                      CertificateFactory cf,
-                                      Set<X509Certificate> out,
-                                      boolean debug) {
-        try {
-            byte[] der = Base64.getDecoder().decode(b64);
-            X509Certificate cert = (X509Certificate) cf.generateCertificate(
-                    new java.io.ByteArrayInputStream(der));
-            out.add(cert);
-        } catch (IllegalArgumentException | CertificateException e) {
-            if (debug) {
-                System.err.println("[ScanDiff] Zertifikat konnte nicht dekodiert werden: " + e.getMessage());
-            }
-        }
-    }
-
-    private boolean looksLikeBase64(String s) {
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (!(c >= 'A' && c <= 'Z') &&
-                    !(c >= 'a' && c <= 'z') &&
-                    !(c >= '0' && c <= '9') &&
-                    c != '+' && c != '/' && c != '=') {
-                return false;
-            }
-        }
-        return true;
     }
 }

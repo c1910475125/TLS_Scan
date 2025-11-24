@@ -4,12 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.maxmind.geoip2.DatabaseReader;
-import com.maxmind.geoip2.exception.AddressNotFoundException;
-import com.maxmind.geoip2.exception.GeoIp2Exception;
-import com.maxmind.geoip2.model.AsnResponse;
-import com.maxmind.geoip2.model.CityResponse;
-import com.maxmind.geoip2.model.CountryResponse;
 
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
@@ -17,7 +11,6 @@ import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
-import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
@@ -203,7 +196,7 @@ public final class Util {
         return "unknown-endpoint";
     }
 
-//    ====Revocation Util====
+    //    ====Revocation Util====
 
     public enum RevocationStatus {
         GOOD,
@@ -301,7 +294,7 @@ public final class Util {
         return Collections.unmodifiableSet(anchors);
     }
 
-//              ====ScanLogUtil====
+    //              ====ScanLog Util====
     public record ScanLogData(
             String ip,
             Integer port,
@@ -317,7 +310,8 @@ public final class Util {
             String subjectCountry,
             String leafPem,
             List<String> chainPem
-    ) { }
+    ) {
+    }
 
     /**
      * Baut die gemeinsame JSON-Struktur für Scan-Logs.
@@ -369,6 +363,112 @@ public final class Util {
         } catch (CertificateEncodingException e) {
             return null;
         }
+    }
+
+    // ==== Certificate Helper ====
+
+    public static X509Certificate chooseRootCertificate(Set<X509Certificate> certsInLine) {
+        if (certsInLine == null || certsInLine.isEmpty()) return null;
+        if (certsInLine.size() == 1) return certsInLine.iterator().next();
+
+        for (X509Certificate candidate : certsInLine) {
+            boolean hasParent = false;
+            for (X509Certificate other : certsInLine) {
+                if (candidate == other) continue;
+                if (other.getSubjectX500Principal().equals(candidate.getIssuerX500Principal())) {
+                    hasParent = true;
+                    break;
+                }
+            }
+            if (!hasParent) {
+                return candidate;
+            }
+        }
+        return certsInLine.iterator().next();
+    }
+
+    public static void extractCertificatesRecursive(
+            JsonNode node,
+            CertificateFactory cf,
+            Set<X509Certificate> out,
+            boolean debug,
+            String context
+    ) {
+        if (node == null || node.isNull()) return;
+
+        if (node.isTextual()) {
+            String text = node.asText();
+            if (text.contains("-----BEGIN CERTIFICATE-----")) {
+                parsePemCertificates(text, cf, out, debug, context);
+                return;
+            }
+            String trimmed = text.trim();
+            if (trimmed.length() >= 100 && looksLikeBase64(trimmed)) {
+                tryDecodeCertificate(trimmed, cf, out, debug, context);
+            }
+            return;
+        }
+
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                extractCertificatesRecursive(child, cf, out, debug, context);
+            }
+            return;
+        }
+
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry ->
+                    extractCertificatesRecursive(entry.getValue(), cf, out, debug, context));
+        }
+    }
+
+    public static void parsePemCertificates(
+            String pem,
+            CertificateFactory cf,
+            Set<X509Certificate> out,
+            boolean debug,
+            String context
+    ) {
+        String[] parts = pem.split("-----END CERTIFICATE-----");
+        for (String part : parts) {
+            if (!part.contains("-----BEGIN CERTIFICATE-----")) continue;
+            String body = part.substring(part.indexOf("-----BEGIN CERTIFICATE-----")
+                            + "-----BEGIN CERTIFICATE-----".length())
+                    .replaceAll("\\s+", "");
+            tryDecodeCertificate(body, cf, out, debug, context);
+        }
+    }
+
+    private static void tryDecodeCertificate(
+            String b64,
+            CertificateFactory cf,
+            Set<X509Certificate> out,
+            boolean debug,
+            String context
+    ) {
+        try {
+            byte[] der = Base64.getDecoder().decode(b64);
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(
+                    new java.io.ByteArrayInputStream(der));
+            out.add(cert);
+        } catch (IllegalArgumentException | CertificateException e) {
+            if (debug) {
+                System.err.println("[" + context + "] Zertifikat konnte nicht dekodiert werden: " + e.getMessage());
+            }
+        }
+    }
+
+    public static boolean looksLikeBase64(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!(c >= 'A' && c <= 'Z') &&
+                    !(c >= 'a' && c <= 'z') &&
+                    !(c >= '0' && c <= '9') &&
+                    c != '+' && c != '/' && c != '=') {
+                return false;
+            }
+        }
+        return true;
     }
 
 //    ====Country Trust Util====
@@ -442,9 +542,9 @@ public final class Util {
 
     /**
      * Bestimmt den "Country-Key" für ein Zertifikat:
-     *  - bevorzugt Subject-Country, sonst Issuer-Country
-     *  - normalisiert auf Großbuchstaben
-     *  - "??" falls nichts gefunden wird
+     * - bevorzugt Subject-Country, sonst Issuer-Country
+     * - normalisiert auf Großbuchstaben
+     * - "??" falls nichts gefunden wird
      */
     public static String determineCountryKeyFromCert(X509Certificate cert) {
         if (cert == null) {
@@ -470,8 +570,8 @@ public final class Util {
 
     /**
      * Aktualisiert die Länder-Zähler für ein Zertifikat:
-     *  - countByCountry: alle Zertifikate nach Country-Key
-     *  - countByCountryForScore: nur, wenn ein Score im countryScores-Map existiert
+     * - countByCountry: alle Zertifikate nach Country-Key
+     * - countByCountryForScore: nur, wenn ein Score im countryScores-Map existiert
      */
     public static void updateCountryCountersForCert(
             X509Certificate cert,

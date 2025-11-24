@@ -29,11 +29,9 @@ public class StoreScorer {
      * Auto-Erkennung:
      * - .pem/.crt/.cer -> als PEM-Bundle bewertet
      * - sonst -> als Java-Keystore (z.B. cacerts, JKS)
-     *
      * countryScoresPath = null -> immer country_trustscores.json aus Ressourcen.
      */
     public void scoreStoreAuto(Path storePath,
-                               char[] passwordIgnored,
                                String countryScoresPath,
                                Path summaryOutput,
                                Path jsonLogOutput,
@@ -47,50 +45,12 @@ public class StoreScorer {
         }
     }
 
-
-    public void scoreStoreAuto(Path storePath,
-                               char[] passwordIgnored,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               boolean debug) throws Exception {
-        scoreStoreAuto(storePath, passwordIgnored, countryScoresPath, summaryOutput, null, debug);
-    }
-
-
-    /**
-     * Kompatibilität: alte Signatur ohne debug-Flag.
-     */
-    public void scoreStore(Path storePath,
-                           char[] password,
-                           String countryScoresPath, Path summaryOutput) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, null,false);
-    }
-
     public void scoreStore(Path storePath,
                            char[] password,
                            String countryScoresPath,
                            Path summaryOutput,
                            Path jsonLogOutput) throws Exception {
         scoreKeystore(storePath, password, countryScoresPath, summaryOutput, jsonLogOutput, false);
-    }
-
-    /**
-     * Bewertet einen Java-Keystore (z.B. cacerts).
-     */
-    public void scoreKeystore(Path storePath,
-                              char[] password,
-                              String countryScoresPath,
-                              Path summaryOutput,
-                              Path jsonLogOutput) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, jsonLogOutput, false);
-    }
-
-    public void scoreKeystore(Path storePath,
-                              char[] password,
-                              String countryScoresPath,
-                              Path summaryOutput,
-                              boolean debug) throws Exception {
-        scoreKeystore(storePath, password, countryScoresPath, summaryOutput, null, debug);
     }
 
     public void scoreKeystore(Path storePath,
@@ -127,24 +87,6 @@ public class StoreScorer {
                 jsonLogOutput,
                 debug
         );
-    }
-
-    /**
-     * Bewertet ein PEM-Bundle (z.B. Mozilla cacert.pem, Google Root-PEM).
-     * Erwartet mehrere "-----BEGIN CERTIFICATE-----" Blöcke.
-     */
-    public void scorePemBundle(Path pemPath,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               Path jsonLogOutput) throws Exception {
-        scorePemBundle(pemPath, countryScoresPath, summaryOutput, jsonLogOutput, false);
-    }
-
-    public void scorePemBundle(Path pemPath,
-                               String countryScoresPath,
-                               Path summaryOutput,
-                               boolean debug) throws Exception {
-        scorePemBundle(pemPath, countryScoresPath, summaryOutput, null, debug);
     }
 
     public void scorePemBundle(Path pemPath,
@@ -202,7 +144,6 @@ public class StoreScorer {
     /**
      * Gemeinsame Bewertungslogik für Keystore & PEM-Bundle.
      * Gewichtung wie bei der JSONL-Analyse:
-     *
      *  - Pro Land: (#Zertifikate Land / #Zertifikate mit Land & Score) * Trustscore(Land)
      *  - Gesamtscore = Summe aller Länderbeiträge, liegt in [0,1] (wenn Trustscores in [0,1] liegen)
      *  - Zertifikate ohne Land oder ohne Score werden für die Score-Berechnung ignoriert,

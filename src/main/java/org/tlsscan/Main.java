@@ -55,10 +55,6 @@ public class Main implements Callable<Integer> {
         return projectRoot().resolve("Scanfiles");
     }
 
-    private static Path defaultOutputPath() {
-        return defaultScanDir().resolve("certs.jsonl");
-    }
-
     private static void ensureDir(Path dir) {
         try {
             if (dir != null && !Files.exists(dir)) {
@@ -160,15 +156,15 @@ public class Main implements Callable<Integer> {
             }
         }
 
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
+        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]");
 
-        // --- HIER: zgrab erzwingen ---------------------------------------
+        // --- zgrab erzwingen ---------------------------------------
         ActiveScanner.AdvancedScanOptions adv = new ActiveScanner.AdvancedScanOptions();
 
         Path zgrabPath = projectRoot()
                 .resolve("bin")
                 .resolve("zgrab2.exe");
-        adv.useZgrabOnly = true;                       // <- wichtig!
+        adv.useZgrabOnly = true;
         adv.zgrabBinary = zgrabPath.toString();
 
         ActiveScanner scanner = new ActiveScanner();
@@ -205,7 +201,7 @@ public class Main implements Callable<Integer> {
         ensureDir(outputFile.getParent());
         System.out.println("Output:  " + outputFile);
 
-        // NEU: Auswahl des Geo-Filter-Typs
+        // Auswahl des Geo-Filter-Typs
         String geoMode = readChoice(in,
                 "Geo-Filter-Typ [country|city|asn]",
                 Set.of("country", "city", "asn"),
@@ -240,7 +236,7 @@ public class Main implements Callable<Integer> {
             }
             case "asn" -> {
                 String asnStr = promptFree(in,
-                        "ASNs (kommagetrennt, z.B. 680,3320 – leer = alle ASNs)",
+                        "ASNs (kommagetrennt, z.B. 13335 (Cloudflare), 15169 (Google) – leer = alle ASNs)",
                         "");
                 if (asnStr != null && !asnStr.isBlank()) {
                     for (String a : asnStr.split(",")) {
@@ -256,9 +252,8 @@ public class Main implements Callable<Integer> {
             }
         }
 
-        int randomCount = (int) readLong(in,
-                "Zufallsstichprobe: Anzahl Hosts aus GeoLite-Blocks-CSV (0 = vollständiger Scan)",
-                0, 0, 1_000_000);
+        int randomCount = (int) readLong(in
+        );
 
         boolean enableFullScan = (randomCount == 0);
 
@@ -275,12 +270,12 @@ public class Main implements Callable<Integer> {
         adv.useZgrabOnly = true;
         adv.zgrabBinary = zgrabPath.toString();
 
-        configureGeoIpDefaults(adv, true);
+        configureGeoIpDefaults(adv);
 
         List<Integer> ports = new ArrayList<>();
         ports.add(443);
 
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
+        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]");
 
         ActiveScanner scanner = new ActiveScanner();
         try {
@@ -301,7 +296,7 @@ public class Main implements Callable<Integer> {
     }
 
 
-    // --- 5) Analyzer ----------------------------------------------------------------------
+    // --- 3) Analyzer ----------------------------------------------------------------------
 
     private static void runAnalyzeInteractive(Scanner in) {
         System.out.println("\n--- JSONL Analyse ---");
@@ -318,11 +313,11 @@ public class Main implements Callable<Integer> {
             return;
         }
 
-        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
+        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]");
 
         boolean saveSummary = readYesNo(in,
-                "Analyse-Ergebnis als JSON speichern? [y/N]",
-                false);
+                "Analyse-Ergebnis als JSON speichern? [y/N]"
+        );
         Path summaryOutput = null;
         if (saveSummary) {
             String timestamp = java.time.ZonedDateTime.now().format(
@@ -359,7 +354,7 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    // --- 6) RootStore-Score ----------------------------------------------------
+    // --- 4) RootStore-Score ----------------------------------------------------
 
     private static void runStoreScoreInteractive(Scanner in) {
         System.out.println("\n--- TrustStore-/CA-Bundle-Score (PEM) ---");
@@ -377,11 +372,11 @@ public class Main implements Callable<Integer> {
             return;
         }
 
-        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]", false);
+        boolean debug = readYesNo(in, "Debug-Details anzeigen? [y/N]");
 
         boolean saveSummary = readYesNo(in,
-                "Analyse-Ergebnis als JSON speichern? [y/N]",
-                false);
+                "Analyse-Ergebnis als JSON speichern? [y/N]"
+        );
         Path summaryOutput = null;
         if (saveSummary) {
             String timestamp = java.time.ZonedDateTime.now().format(
@@ -407,10 +402,8 @@ public class Main implements Callable<Integer> {
 
         StoreScorer scorer = new StoreScorer();
         try {
-            // Passwort ist für PEM egal, wird von scoreStoreAuto ignoriert
             scorer.scoreStoreAuto(
                     inPath,
-                    null,
                     null,
                     summaryOutput,
                     null,
@@ -454,7 +447,7 @@ public class Main implements Callable<Integer> {
                 ""
         );
 
-        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]", false);
+        boolean debug = readYesNo(in, "Debug-Logging aktivieren? [y/N]");
 
         Path oldPath = resolveScanPath(oldName);
         Path newPath = resolveScanPath(newName);
@@ -490,7 +483,7 @@ public class Main implements Callable<Integer> {
             diff.compare(
                     oldPath,
                     newPath,
-                    null,       // country_trustscores via Fallback-Ressource
+                    null,
                     debug,
                     summaryOut
             );
@@ -536,12 +529,12 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    private static boolean readYesNo(Scanner in, String prompt, boolean defaultVal) {
+    private static boolean readYesNo(Scanner in, String prompt) {
         while (true) {
             System.out.print(prompt + " ");
             String line = in.nextLine();
             if (line == null || line.isBlank()) {
-                return defaultVal;
+                return false;
             }
             line = line.trim().toLowerCase(Locale.ROOT);
             if (line.equals("y") || line.equals("yes") || line.equals("j") || line.equals("ja")) {
@@ -554,7 +547,7 @@ public class Main implements Callable<Integer> {
         }
     }
 
-    private static void configureGeoIpDefaults(ActiveScanner.AdvancedScanOptions adv, boolean logWarnings) {
+    private static void configureGeoIpDefaults(ActiveScanner.AdvancedScanOptions adv) {
         Path geoipDir = projectRoot().resolve("GeoIP");
 
         // MMDBs
@@ -564,19 +557,19 @@ public class Main implements Callable<Integer> {
 
         if (Files.exists(defCountryDb)) {
             adv.geoipCountryDbPath = defCountryDb.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Warnung: Country-DB nicht gefunden: " + defCountryDb);
         }
 
         if (Files.exists(defAsnDb)) {
             adv.geoipAsnDbPath = defAsnDb.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Warnung: ASN-DB nicht gefunden: " + defAsnDb);
         }
 
         if (Files.exists(defCityDb)) {
             adv.geoipCityDbPath = defCityDb.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: City-DB nicht gefunden: " + defCityDb);
         }
 
@@ -585,19 +578,19 @@ public class Main implements Callable<Integer> {
         Path countryLocCsv    = geoipDir.resolve("GeoLite2-Country-Locations-en.csv");
         if (Files.exists(countryBlocksCsv)) {
             adv.countryBlocksCsvPath = countryBlocksCsv.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: Country-Blocks-CSV nicht gefunden: " + countryBlocksCsv);
         }
         if (Files.exists(countryLocCsv)) {
             adv.countryLocationsCsvPath = countryLocCsv.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: Country-Locations-CSV nicht gefunden: " + countryLocCsv);
         }
 
         Path asnBlocksCsv = geoipDir.resolve("GeoLite2-ASN-Blocks-IPv4.csv");
         if (Files.exists(asnBlocksCsv)) {
             adv.asnBlocksCsvPath = asnBlocksCsv.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: ASN-Blocks-CSV nicht gefunden: " + asnBlocksCsv);
         }
 
@@ -605,29 +598,29 @@ public class Main implements Callable<Integer> {
         Path cityLocCsv    = geoipDir.resolve("GeoLite2-City-Locations-en.csv");
         if (Files.exists(cityBlocksCsv)) {
             adv.cityBlocksCsvPath = cityBlocksCsv.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: City-Blocks-CSV nicht gefunden: " + cityBlocksCsv);
         }
         if (Files.exists(cityLocCsv)) {
             adv.cityLocationsCsvPath = cityLocCsv.toString();
-        } else if (logWarnings) {
+        } else {
             System.out.println("[GeoIP] Hinweis: City-Locations-CSV nicht gefunden: " + cityLocCsv);
         }
     }
 
 
 
-    private static long readLong(Scanner in, String prompt, long defaultVal, long min, long max) {
+    private static long readLong(Scanner in) {
         while (true) {
-            System.out.print(prompt + " [" + defaultVal + "]: ");
+            System.out.print("Zufallsstichprobe: Anzahl Hosts aus GeoLite-Blocks-CSV (0 = vollständiger Scan)" + " [" + (long) 0 + "]: ");
             String line = in.nextLine();
             if (line == null || line.isBlank()) {
-                return defaultVal;
+                return 0;
             }
             try {
                 long v = Long.parseLong(line.trim());
-                if (v < min || v > max) {
-                    System.out.println("Wert außerhalb des gültigen Bereichs (" + min + "–" + max + ").");
+                if (v < (long) 0 || v > (long) 1000000) {
+                    System.out.println("Wert außerhalb des gültigen Bereichs (" + (long) 0 + "–" + (long) 1000000 + ").");
                     continue;
                 }
                 return v;
@@ -644,13 +637,4 @@ public class Main implements Callable<Integer> {
         return s.trim();
     }
 
-    private static Path defaultJavaCacerts() {
-        String javaHome = System.getProperty("java.home");
-        if (javaHome == null) return Paths.get("");
-        return Paths.get(javaHome, "lib", "security", "cacerts");
-    }
-
-    private static String emptyToNull(String s) {
-        return (s == null || s.isBlank()) ? null : s;
-    }
 }
