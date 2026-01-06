@@ -34,7 +34,7 @@ Therefore, the application is currently intended to be run on **Windows** (unles
 ### 1) Clone the repository
 
 ```bash
-git clone https://github.com/c1910475125/TLS_Scan
+git clone https://github.com/c1910475125/TLS_Scan.git
 cd TLS_Scan
 
 ```
