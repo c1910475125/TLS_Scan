@@ -46,6 +46,7 @@ Download GeoLite2 DBs from MaxMind (available for free, account + license accept
 - GeoLite ASN mmdb and CSV
 - GeoLite City mmdb and CSV
 - GeoLite Country mmdb and CSV
+
 https://www.maxmind.com/en/geolite-free-ip-geolocation-data
 
 Create the folder (if it does not exist yet):
