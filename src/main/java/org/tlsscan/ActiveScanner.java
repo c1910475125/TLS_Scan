@@ -1206,12 +1206,13 @@ public class ActiveScanner {
             JsonNode handshake = result.path("handshake_log");
             JsonNode serverHello = handshake.path("server_hello");
 
-            String version;
-            JsonNode vNode = serverHello.path("version");
-            if (vNode.isTextual()) {
-                version = vNode.asText();
-            } else {
-                version = vNode.path("name").asText(null);
+            String legacyVersion = readNameOrText(serverHello.path("version"));
+
+            String version = readNameOrText(
+                    serverHello.path("supported_versions").path("selected_version")
+            );
+            if (version == null || version.isBlank()) {
+                version = legacyVersion;
             }
 
             String cipherSuite;
@@ -1678,6 +1679,24 @@ public class ActiveScanner {
                 }
             }
             return true;
+        }
+
+        private String readNameOrText(JsonNode node) {
+            if (node == null || node.isMissingNode() || node.isNull()) {
+                return null;
+            }
+            if (node.isTextual()) {
+                return node.asText();
+            }
+            String name = node.path("name").asText(null);
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+            String value = node.path("value").asText(null);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+            return node.asText(null);
         }
 
     }
